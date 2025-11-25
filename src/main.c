@@ -64,6 +64,7 @@ static bool frame_limit_enabled = false;
 static uint32_t frame_limit_total = 0U;
 static uint32_t frame_limit_sent = 0U;
 static bool binary_stream_active = false;
+static bool radar_initialized = false;
 
 /* Allocate enough memory for the radar dara frame. */
 static uint16_t samples[NUM_SAMPLES_PER_FRAME];
@@ -139,9 +140,6 @@ int main(void)
                             8,
                             CYHAL_SPI_MODE_00_MSB,
                             false);
-    
-    bool radar_initialized = false;
-    cy_rslt_t radar_result = result;
 
     if (result == CY_RSLT_SUCCESS)
     {
@@ -175,7 +173,6 @@ int main(void)
                                                PIN_XENSIV_BGT60TRXX_RSTN,
                                                register_list,
                                                XENSIV_BGT60TRXX_CONF_NUM_REGS);
-            radar_result = result;
 
             if (result == CY_RSLT_SUCCESS)
             {
@@ -210,7 +207,11 @@ int main(void)
 
         if (!radar_initialized && !error_reported)
         {
-            status_printf("Radar Init Failed: 0x%08lX\r\n", (unsigned long)radar_result);
+            for (int i = 0; i < 3; i++)
+            {
+                status_printf("NO SPI CONNECTED\r\n");
+                cyhal_system_delay_ms(1000);
+            }
             error_reported = true;
         }
 
@@ -324,34 +325,38 @@ static void process_cli(void)
     static uint32_t cmd_index = 0;
     char ch;
 
-    /* Check if data is available in USB buffer */
-    if (USBD_CDC_GetNumBytesInBuffer(usb_cdcHandle) > 0)
+    /* Try to read a byte from USB CDC (non-blocking) */
+    if (USBD_CDC_Read(usb_cdcHandle, &ch, 1, 0) == 1)
     {
-        if (USBD_CDC_Read(usb_cdcHandle, &ch, 1, 0) == 1)
-        {
-            /* Echo back */
-            USBD_CDC_Write(usb_cdcHandle, &ch, 1, 0);
+        /* Echo back */
+        USBD_CDC_Write(usb_cdcHandle, &ch, 1, 0);
 
-            if ((ch == '\r') || (ch == '\n'))
+        if ((ch == '\r') || (ch == '\n'))
+        {
+            if (cmd_index > 0)
             {
-                if (cmd_index > 0)
+                cmd_buffer[cmd_index] = '\0';
+
+                if (!radar_initialized && (strncmp(cmd_buffer, "start", 5) == 0) &&
+                    ((cmd_buffer[5] == '\0') || (cmd_buffer[5] == ' ') || (cmd_buffer[5] == '\t')))
                 {
-                    cmd_buffer[cmd_index] = '\0';
-                    USBD_CDC_Write(usb_cdcHandle, "\r\n", 2, 0); /* New line for echo */
-                    handle_command(cmd_buffer);
-                    cmd_index = 0;
+                    USBD_CDC_Write(usb_cdcHandle, " No SPI found", 13, 0);
                 }
+
+                USBD_CDC_Write(usb_cdcHandle, "\r\n", 2, 0); /* New line for echo */
+                handle_command(cmd_buffer);
+                cmd_index = 0;
+            }
+        }
+        else
+        {
+            if (cmd_index < (sizeof(cmd_buffer) - 1))
+            {
+                cmd_buffer[cmd_index++] = ch;
             }
             else
             {
-                if (cmd_index < (sizeof(cmd_buffer) - 1))
-                {
-                    cmd_buffer[cmd_index++] = ch;
-                }
-                else
-                {
-                    cmd_index = 0;
-                }
+                cmd_index = 0;
             }
         }
     }
@@ -419,6 +424,11 @@ static void handle_command(const char *cmd)
     if ((strncmp(cmd, "start", 5) == 0) &&
         ((cmd[5] == '\0') || (cmd[5] == ' ') || (cmd[5] == '\t')))
     {
+        if (!radar_initialized)
+        {
+            return;
+        }
+
         uint32_t requested_frames = 0U;
 
         if (!parse_frame_count_argument(cmd + 5, &requested_frames))
