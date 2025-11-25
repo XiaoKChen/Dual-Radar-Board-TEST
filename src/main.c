@@ -123,7 +123,12 @@ int main(void)
     USBD_SetDeviceInfo(&usb_deviceInfo);
     USBD_Start();
 
+    /* Allow some time for USB enumeration to start before risking a crash in Radar init */
+    cyhal_system_delay_ms(1000);
+
     /* Initialize Radar */
+    /* WARNING: P2_0, P2_1, P2_2, P2_3 are connected to WiFi SDIO on CY8CPROTO-062S3-4343W.
+       Using them for SPI might cause contention or hard faults if the WiFi chip is active. */
     /* Initialize the SPI interface to BGT60. */
     result = cyhal_spi_init(&cyhal_spi,
                             PIN_XENSIV_BGT60TRXX_SPI_MOSI,
@@ -134,56 +139,65 @@ int main(void)
                             8,
                             CYHAL_SPI_MODE_00_MSB,
                             false);
-    CY_ASSERT(result == CY_RSLT_SUCCESS);
+    
+    bool radar_initialized = false;
+    cy_rslt_t radar_result = result;
 
-    /* Reduce drive strength to improve EMI */
-    Cy_GPIO_SetSlewRate(CYHAL_GET_PORTADDR(PIN_XENSIV_BGT60TRXX_SPI_MOSI),
-                        CYHAL_GET_PIN(PIN_XENSIV_BGT60TRXX_SPI_MOSI), CY_GPIO_SLEW_FAST);
-    Cy_GPIO_SetDriveSel(CYHAL_GET_PORTADDR(PIN_XENSIV_BGT60TRXX_SPI_MOSI),
-                        CYHAL_GET_PIN(PIN_XENSIV_BGT60TRXX_SPI_MOSI), CY_GPIO_DRIVE_1_8);
-    Cy_GPIO_SetSlewRate(CYHAL_GET_PORTADDR(PIN_XENSIV_BGT60TRXX_SPI_SCLK),
-                        CYHAL_GET_PIN(PIN_XENSIV_BGT60TRXX_SPI_SCLK), CY_GPIO_SLEW_FAST);
-    Cy_GPIO_SetDriveSel(CYHAL_GET_PORTADDR(PIN_XENSIV_BGT60TRXX_SPI_SCLK),
-                        CYHAL_GET_PIN(PIN_XENSIV_BGT60TRXX_SPI_SCLK), CY_GPIO_DRIVE_1_8);
-
-    /* Set SPI data rate to communicate with sensor */
-    result = cyhal_spi_set_frequency(&cyhal_spi, XENSIV_BGT60TRXX_SPI_FREQUENCY);
-    CY_ASSERT(result == CY_RSLT_SUCCESS);
-
-    /* Enable the LDO. */
-    // result = cyhal_gpio_init(PIN_XENSIV_BGT60TRXX_LDO_EN,
-    //                          CYHAL_GPIO_DIR_OUTPUT,
-    //                          CYHAL_GPIO_DRIVE_STRONG,
-    //                          true);
-    // CY_ASSERT(result == CY_RSLT_SUCCESS);
-
-    /* Wait LDO stable */
-    (void)cyhal_system_delay_ms(5);
-
-    result = xensiv_bgt60trxx_mtb_init(&sensor,
-                                       &cyhal_spi,
-                                       PIN_XENSIV_BGT60TRXX_SPI_CSN,
-                                       PIN_XENSIV_BGT60TRXX_RSTN,
-                                       register_list,
-                                       XENSIV_BGT60TRXX_CONF_NUM_REGS);
-    CY_ASSERT(result == CY_RSLT_SUCCESS);
-
-    /* The sensor will generate an interrupt once the sensor FIFO level is NUM_SAMPLES_PER_FRAME */
-    result = xensiv_bgt60trxx_mtb_interrupt_init(&sensor,
-                                                 NUM_SAMPLES_PER_FRAME,
-                                                 PIN_XENSIV_BGT60TRXX_IRQ,
-                                                 CYHAL_ISR_PRIORITY_DEFAULT,
-                                                 xensiv_bgt60trxx_mtb_interrupt_handler,
-                                                 NULL);
-    CY_ASSERT(result == CY_RSLT_SUCCESS);
-
-    /* Ensure acquisition is idle until commanded via CLI */
-    if (xensiv_bgt60trxx_start_frame(&sensor.dev, false) != XENSIV_BGT60TRXX_STATUS_OK)
+    if (result == CY_RSLT_SUCCESS)
     {
-        CY_ASSERT(0);
+        /* Reduce drive strength to improve EMI */
+        Cy_GPIO_SetSlewRate(CYHAL_GET_PORTADDR(PIN_XENSIV_BGT60TRXX_SPI_MOSI),
+                            CYHAL_GET_PIN(PIN_XENSIV_BGT60TRXX_SPI_MOSI), CY_GPIO_SLEW_FAST);
+        Cy_GPIO_SetDriveSel(CYHAL_GET_PORTADDR(PIN_XENSIV_BGT60TRXX_SPI_MOSI),
+                            CYHAL_GET_PIN(PIN_XENSIV_BGT60TRXX_SPI_MOSI), CY_GPIO_DRIVE_1_8);
+        Cy_GPIO_SetSlewRate(CYHAL_GET_PORTADDR(PIN_XENSIV_BGT60TRXX_SPI_SCLK),
+                            CYHAL_GET_PIN(PIN_XENSIV_BGT60TRXX_SPI_SCLK), CY_GPIO_SLEW_FAST);
+        Cy_GPIO_SetDriveSel(CYHAL_GET_PORTADDR(PIN_XENSIV_BGT60TRXX_SPI_SCLK),
+                            CYHAL_GET_PIN(PIN_XENSIV_BGT60TRXX_SPI_SCLK), CY_GPIO_DRIVE_1_8);
+
+        /* Set SPI data rate to communicate with sensor */
+        result = cyhal_spi_set_frequency(&cyhal_spi, XENSIV_BGT60TRXX_SPI_FREQUENCY);
+        
+        if (result == CY_RSLT_SUCCESS)
+        {
+             /* Enable the LDO. */
+            // result = cyhal_gpio_init(PIN_XENSIV_BGT60TRXX_LDO_EN,
+            //                          CYHAL_GPIO_DIR_OUTPUT,
+            //                          CYHAL_GPIO_DRIVE_STRONG,
+            //                          true);
+            
+            /* Wait LDO stable */
+            (void)cyhal_system_delay_ms(5);
+
+            result = xensiv_bgt60trxx_mtb_init(&sensor,
+                                               &cyhal_spi,
+                                               PIN_XENSIV_BGT60TRXX_SPI_CSN,
+                                               PIN_XENSIV_BGT60TRXX_RSTN,
+                                               register_list,
+                                               XENSIV_BGT60TRXX_CONF_NUM_REGS);
+            radar_result = result;
+
+            if (result == CY_RSLT_SUCCESS)
+            {
+                 /* The sensor will generate an interrupt once the sensor FIFO level is NUM_SAMPLES_PER_FRAME */
+                result = xensiv_bgt60trxx_mtb_interrupt_init(&sensor,
+                                                             NUM_SAMPLES_PER_FRAME,
+                                                             PIN_XENSIV_BGT60TRXX_IRQ,
+                                                             CYHAL_ISR_PRIORITY_DEFAULT,
+                                                             xensiv_bgt60trxx_mtb_interrupt_handler,
+                                                             NULL);
+                 if (result == CY_RSLT_SUCCESS)
+                 {
+                    /* Ensure acquisition is idle until commanded via CLI */
+                    xensiv_bgt60trxx_start_frame(&sensor.dev, false);
+                    radar_initialized = true;
+                 }
+            }
+        }
     }
 
     uint32_t frame_idx = 0;
+    bool error_reported = false;
 
     for (;;)
     {
@@ -194,6 +208,12 @@ int main(void)
             continue;
         }
 
+        if (!radar_initialized && !error_reported)
+        {
+            status_printf("Radar Init Failed: 0x%08lX\r\n", (unsigned long)radar_result);
+            error_reported = true;
+        }
+
         process_cli();
 
         if (!capture_enabled)
@@ -202,8 +222,14 @@ int main(void)
             continue;
         }
 
+        if (!radar_initialized)
+        {
+            status_printf("Cannot start capture: Radar not initialized.\r\n");
+            capture_enabled = false;
+            continue;
+        }
+
         /* Wait for the radar device to indicate the availability of the data to fetch. */
-        /* Note: We also need to keep processing CLI in case of stop command */
         while ((capture_enabled == true) && (data_available == false))
         {
             process_cli();
@@ -213,6 +239,11 @@ int main(void)
                 capture_enabled = false;
                 break;
             }
+        }
+
+        if (!capture_enabled)
+        {
+            continue;
         }
 
         if (!capture_enabled)
