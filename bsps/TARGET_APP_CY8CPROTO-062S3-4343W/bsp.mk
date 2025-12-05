@@ -31,7 +31,7 @@ endif
 # Any additional components to apply when using this board.
 # Use a default CM0+ image (CM0P_SLEEP). This can be swapped for a different
 # pre-built image or removed if custom built project.
-BSP_COMPONENTS:=CM0P_SLEEP WIFI_INTERFACE_SDIO
+BSP_COMPONENTS:=CM0P_SLEEP
 
 # Any additional defines to apply when using this board.
 # This board has an MCU with 512K of internal flash, but also has an external

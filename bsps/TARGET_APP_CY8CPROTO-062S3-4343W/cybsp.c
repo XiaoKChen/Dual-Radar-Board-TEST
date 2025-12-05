@@ -141,7 +141,7 @@ cy_rslt_t cybsp_init(void)
     // cybsp_wifi_init_primary(). This is typically done when starting up WiFi.
     if (CY_RSLT_SUCCESS == result)
     {
-        result = SDIO_ReserveResources();
+        // result = SDIO_ReserveResources();
     }
     #endif // defined(CYBSP_WIFI_CAPABLE) && defined(CYHAL_UDB_SIO)
 

@@ -29,7 +29,8 @@
             "--log=verbose",
             "--background-index",
             "--compile-commands-dir=${workspaceFolder}/build"
-        ]
+        ],
+        "workbench.colorTheme": "Userscape Contrast (rainglow)"
     },
     "extensions": {
         "recommendations": [ "marus25.cortex-debug", "ms-vscode.cpptools", "dan-c-underwood.arm" ]

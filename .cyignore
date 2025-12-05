@@ -7,3 +7,5 @@ templates
 .settings
 .vscode
 
+# Python
+data_test

@@ -20,20 +20,37 @@
 ********************************************************************************/
 #define USB_CONFIG_DELAY          (50U) /* In milliseconds */
 
-/* sensor SPI interface */
-#define PIN_XENSIV_BGT60TRXX_SPI_SCLK       P2_2
-#define PIN_XENSIV_BGT60TRXX_SPI_MOSI       P2_0
-#define PIN_XENSIV_BGT60TRXX_SPI_MISO       P2_1
-#define PIN_XENSIV_BGT60TRXX_SPI_CSN        P2_3
+#define RADAR_1
 
-/* sensor interrupt output pin */
-#define PIN_XENSIV_BGT60TRXX_IRQ            P2_5
-/* sensor HW reset pin */
-#define PIN_XENSIV_BGT60TRXX_RSTN           P2_7
+#if defined(RADAR_1)
+    /* sensor SPI interface */
+    #define PIN_XENSIV_BGT60TRXX_SPI_SCLK       Radar_SPI_CLK
+    #define PIN_XENSIV_BGT60TRXX_SPI_MOSI       Radar_SPI_MOSI
+    #define PIN_XENSIV_BGT60TRXX_SPI_MISO       Radar_SPI_MISO
+    #define PIN_XENSIV_BGT60TRXX_SPI_CSN        Radar_CS_1
+
+    /* sensor interrupt output pin */
+    #define PIN_XENSIV_BGT60TRXX_IRQ            Radar_IRQ_1
+    /* sensor HW reset pin */
+    #define PIN_XENSIV_BGT60TRXX_RSTN           Radar_RST
+#endif
+
+#if defined(RADAR_2)
+    /* sensor SPI interface */
+    #define PIN_XENSIV_BGT60TRXX_SPI_SCLK       Radar_SPI_CLK
+    #define PIN_XENSIV_BGT60TRXX_SPI_MOSI       Radar_SPI_MOSI
+    #define PIN_XENSIV_BGT60TRXX_SPI_MISO       Radar_SPI_MISO
+    #define PIN_XENSIV_BGT60TRXX_SPI_CSN        Radar_CS_1
+
+    /* sensor interrupt output pin */
+    #define PIN_XENSIV_BGT60TRXX_IRQ            Radar_IRQ_1
+    /* sensor HW reset pin */
+    #define PIN_XENSIV_BGT60TRXX_RSTN           Radar_RST
+#endif
 /* enable 1V8 LDO on radar wingboard*/
 // #define PIN_XENSIV_BGT60TRXX_LDO_EN         NO_LDO_EN_PIN_LDO_ALWAYS_ON
 
-#define XENSIV_BGT60TRXX_SPI_FREQUENCY      (25000000UL)
+#define XENSIV_BGT60TRXX_SPI_FREQUENCY      (24000000UL)
 
 #define NUM_SAMPLES_PER_FRAME               (XENSIV_BGT60TRXX_CONF_NUM_RX_ANTENNAS *\
                                              XENSIV_BGT60TRXX_CONF_NUM_CHIRPS_PER_FRAME *\
@@ -41,6 +58,23 @@
 
 #define BINARY_FRAME_HEADER_VERSION         (1U)
 #define BINARY_FRAME_SAMPLE_SIZE_BYTES      ((uint16_t)sizeof(uint16_t))
+
+#define LED1 P10_3
+#define LED2 P10_2
+
+void turn_on_leds(void)
+{
+    cyhal_gpio_init(LED1, CYHAL_GPIO_DIR_OUTPUT, CYHAL_GPIO_DRIVE_STRONG, 0);
+    cyhal_gpio_init(LED2, CYHAL_GPIO_DIR_OUTPUT, CYHAL_GPIO_DRIVE_STRONG, 0);
+
+    // cyhal_gpio_init(PIN_XENSIV_BGT60TRXX_SPI_SCLK, CYHAL_GPIO_DIR_OUTPUT, CYHAL_GPIO_DRIVE_PULL_NONE, 1);
+    // cyhal_gpio_init(PIN_XENSIV_BGT60TRXX_SPI_MOSI, CYHAL_GPIO_DIR_OUTPUT, CYHAL_GPIO_DRIVE_PULL_NONE, 1);
+    // cyhal_gpio_init(PIN_XENSIV_BGT60TRXX_SPI_MISO, CYHAL_GPIO_DIR_OUTPUT, CYHAL_GPIO_DRIVE_PULL_NONE, 1);
+    cyhal_gpio_init(PIN_XENSIV_BGT60TRXX_SPI_CSN, CYHAL_GPIO_DIR_OUTPUT, CYHAL_GPIO_DRIVE_PULL_NONE, 1);
+    // cyhal_gpio_init(PIN_XENSIV_BGT60TRXX_IRQ, CYHAL_GPIO_DIR_OUTPUT, CYHAL_GPIO_DRIVE_PULL_NONE, 1);
+    // cyhal_gpio_init(PIN_XENSIV_BGT60TRXX_RSTN, CYHAL_GPIO_DIR_OUTPUT, CYHAL_GPIO_DRIVE_PULL_NONE, 1);
+
+}
 
 typedef struct __attribute__((packed))
 {
@@ -52,7 +86,7 @@ typedef struct __attribute__((packed))
 } binary_frame_header_t;
 
 /*******************************************************************************
-* Global Variables
+* Global variables
 ********************************************************************************/
 static USB_CDC_HANDLE usb_cdcHandle;
 
@@ -69,15 +103,17 @@ static bool radar_initialized = false;
 /* Allocate enough memory for the radar dara frame. */
 static uint16_t samples[NUM_SAMPLES_PER_FRAME];
 
-/*******************************************************************************
-* Function Prototypes
-********************************************************************************/
-void usb_add_cdc(void);
 static bool parse_frame_count_argument(const char *arg, uint32_t *out_value);
 static void handle_command(const char *cmd);
 static void process_cli(void);
 static void send_frame_binary(uint32_t frame_idx);
 static void status_printf(const char *fmt, ...);
+#if defined(CYHAL_API_VERSION) && (CYHAL_API_VERSION >= 2)
+void xensiv_bgt60trxx_mtb_interrupt_handler(void *args, cyhal_gpio_event_t event);
+#else
+void xensiv_bgt60trxx_mtb_interrupt_handler(void *args, cyhal_gpio_irq_event_t event);
+#endif
+void usb_add_cdc(void);
 #if defined(CYHAL_API_VERSION) && (CYHAL_API_VERSION >= 2)
 void xensiv_bgt60trxx_mtb_interrupt_handler(void *args, cyhal_gpio_event_t event);
 #else
@@ -95,28 +131,36 @@ static const USB_DEVICE_INFO usb_deviceInfo = {
     "12345678"                        /* SerialNumber */
 };
 
-/*******************************************************************************
-* Function Name: main
-*******************************************************************************/
+/* Interrupt handler to react on sensor indicating the availability of new data */
+#if defined(CYHAL_API_VERSION) && (CYHAL_API_VERSION >= 2)
+void xensiv_bgt60trxx_mtb_interrupt_handler(void *args, cyhal_gpio_event_t event)
+#else
+void xensiv_bgt60trxx_mtb_interrupt_handler(void *args, cyhal_gpio_irq_event_t event)
+#endif
+{
+    CY_UNUSED_PARAMETER(args);
+    CY_UNUSED_PARAMETER(event);
+    data_available = true;
+}
+
 int main(void)
 {
-    cy_rslt_t result;
+    cy_rslt_t result = CY_RSLT_SUCCESS;
 
-    /* Initialize the device and board peripherals */
+    /* Initialize the device and board peripherals. */
     result = cybsp_init();
-    if (result != CY_RSLT_SUCCESS)
-    {
-        CY_ASSERT(0);
-    }
+    CY_ASSERT(result == CY_RSLT_SUCCESS);
 
-    /* Enable global interrupts */
     __enable_irq();
 
-    /* Initialize retarget-io to use the debug UART port (optional, for debug) */
-    cy_retarget_io_init(CYBSP_DEBUG_UART_TX, CYBSP_DEBUG_UART_RX, CY_RETARGET_IO_BAUDRATE);
+    /* Initialize retarget-io to use the debug UART port. */
+    result = cy_retarget_io_init(P7_1, P7_0, CY_RETARGET_IO_BAUDRATE);
+    CY_ASSERT(result == CY_RSLT_SUCCESS);
+
+    // printf("Device started, initializing USB...\r\n");
 
     /* Initialize the User LED */
-    cyhal_gpio_init(CYBSP_USER_LED, CYHAL_GPIO_DIR_OUTPUT, CYHAL_GPIO_DRIVE_STRONG, CYBSP_LED_STATE_OFF);
+    cyhal_gpio_init(LED1, CYHAL_GPIO_DIR_OUTPUT, CYHAL_GPIO_DRIVE_STRONG, 0);
 
     /* Initializes the USB stack */
     USBD_Init();
@@ -124,12 +168,30 @@ int main(void)
     USBD_SetDeviceInfo(&usb_deviceInfo);
     USBD_Start();
 
-    /* Allow some time for USB enumeration to start before risking a crash in Radar init */
-    cyhal_system_delay_ms(1000);
+    // printf("USB started, waiting for configuration...\r\n");
 
-    /* Initialize Radar */
-    /* WARNING: P2_0, P2_1, P2_2, P2_3 are connected to WiFi SDIO on CY8CPROTO-062S3-4343W.
-       Using them for SPI might cause contention or hard faults if the WiFi chip is active. */
+    /* Wait for USB configuration with timeout */
+    uint32_t timeout = 0;
+    while ((USBD_GetState() & USB_STAT_CONFIGURED) != USB_STAT_CONFIGURED)
+    {
+        cyhal_system_delay_ms(USB_CONFIG_DELAY);
+        timeout++;
+        if (timeout > 200)  /* 10 seconds timeout */
+        {
+            // printf("USB configuration timeout!\r\n");
+            break;
+        }
+    }
+
+    status_printf("USB configured.\r\n");
+
+    /* Allow time for USB to fully initialize */
+    cyhal_system_delay_ms(500);
+
+    status_printf("XENSIV BGT60TRxx Example\r\n");
+    status_printf("Serial terminal connected.\r\n");
+
+    status_printf("Debug: Initializing SPI...\r\n");
     /* Initialize the SPI interface to BGT60. */
     result = cyhal_spi_init(&cyhal_spi,
                             PIN_XENSIV_BGT60TRXX_SPI_MOSI,
@@ -140,111 +202,138 @@ int main(void)
                             8,
                             CYHAL_SPI_MODE_00_MSB,
                             false);
-
-    if (result == CY_RSLT_SUCCESS)
+    
+    if (result != CY_RSLT_SUCCESS)
     {
-        /* Reduce drive strength to improve EMI */
-        Cy_GPIO_SetSlewRate(CYHAL_GET_PORTADDR(PIN_XENSIV_BGT60TRXX_SPI_MOSI),
-                            CYHAL_GET_PIN(PIN_XENSIV_BGT60TRXX_SPI_MOSI), CY_GPIO_SLEW_FAST);
-        Cy_GPIO_SetDriveSel(CYHAL_GET_PORTADDR(PIN_XENSIV_BGT60TRXX_SPI_MOSI),
-                            CYHAL_GET_PIN(PIN_XENSIV_BGT60TRXX_SPI_MOSI), CY_GPIO_DRIVE_1_8);
-        Cy_GPIO_SetSlewRate(CYHAL_GET_PORTADDR(PIN_XENSIV_BGT60TRXX_SPI_SCLK),
-                            CYHAL_GET_PIN(PIN_XENSIV_BGT60TRXX_SPI_SCLK), CY_GPIO_SLEW_FAST);
-        Cy_GPIO_SetDriveSel(CYHAL_GET_PORTADDR(PIN_XENSIV_BGT60TRXX_SPI_SCLK),
-                            CYHAL_GET_PIN(PIN_XENSIV_BGT60TRXX_SPI_SCLK), CY_GPIO_DRIVE_1_8);
-
-        /* Set SPI data rate to communicate with sensor */
-        result = cyhal_spi_set_frequency(&cyhal_spi, XENSIV_BGT60TRXX_SPI_FREQUENCY);
-        
-        if (result == CY_RSLT_SUCCESS)
+        for(;;) 
         {
-             /* Enable the LDO. */
-            // result = cyhal_gpio_init(PIN_XENSIV_BGT60TRXX_LDO_EN,
-            //                          CYHAL_GPIO_DIR_OUTPUT,
-            //                          CYHAL_GPIO_DRIVE_STRONG,
-            //                          true);
-            
-            /* Wait LDO stable */
-            (void)cyhal_system_delay_ms(5);
-
-            result = xensiv_bgt60trxx_mtb_init(&sensor,
-                                               &cyhal_spi,
-                                               PIN_XENSIV_BGT60TRXX_SPI_CSN,
-                                               PIN_XENSIV_BGT60TRXX_RSTN,
-                                               register_list,
-                                               XENSIV_BGT60TRXX_CONF_NUM_REGS);
-
-            if (result == CY_RSLT_SUCCESS)
-            {
-                 /* The sensor will generate an interrupt once the sensor FIFO level is NUM_SAMPLES_PER_FRAME */
-                result = xensiv_bgt60trxx_mtb_interrupt_init(&sensor,
-                                                             NUM_SAMPLES_PER_FRAME,
-                                                             PIN_XENSIV_BGT60TRXX_IRQ,
-                                                             CYHAL_ISR_PRIORITY_DEFAULT,
-                                                             xensiv_bgt60trxx_mtb_interrupt_handler,
-                                                             NULL);
-                 if (result == CY_RSLT_SUCCESS)
-                 {
-                    /* Ensure acquisition is idle until commanded via CLI */
-                    xensiv_bgt60trxx_start_frame(&sensor.dev, false);
-                    radar_initialized = true;
-                 }
-            }
+            status_printf("SPI connected: NO - SPI initialization failed. Error: 0x%08lX\r\n", (unsigned long)result);
+            process_cli();
+            cyhal_system_delay_ms(1000);
         }
     }
+    status_printf("Debug: SPI Initialized.\r\n");
+
+    /* Reduce drive strength to improve EMI */
+    Cy_GPIO_SetSlewRate(CYHAL_GET_PORTADDR(PIN_XENSIV_BGT60TRXX_SPI_MOSI),
+                        CYHAL_GET_PIN(PIN_XENSIV_BGT60TRXX_SPI_MOSI), CY_GPIO_SLEW_FAST);
+    Cy_GPIO_SetDriveSel(CYHAL_GET_PORTADDR(PIN_XENSIV_BGT60TRXX_SPI_MOSI),
+                        CYHAL_GET_PIN(PIN_XENSIV_BGT60TRXX_SPI_MOSI), CY_GPIO_DRIVE_1_8);
+    Cy_GPIO_SetSlewRate(CYHAL_GET_PORTADDR(PIN_XENSIV_BGT60TRXX_SPI_SCLK),
+                        CYHAL_GET_PIN(PIN_XENSIV_BGT60TRXX_SPI_SCLK), CY_GPIO_SLEW_FAST);
+    Cy_GPIO_SetDriveSel(CYHAL_GET_PORTADDR(PIN_XENSIV_BGT60TRXX_SPI_SCLK),
+                        CYHAL_GET_PIN(PIN_XENSIV_BGT60TRXX_SPI_SCLK), CY_GPIO_DRIVE_1_8);
+
+    status_printf("Debug: Setting SPI frequency...\r\n");
+    /* Set SPI data rate to communicate with sensor */
+    result = cyhal_spi_set_frequency(&cyhal_spi, XENSIV_BGT60TRXX_SPI_FREQUENCY);
+    
+    if (result != CY_RSLT_SUCCESS)
+    {
+        for(;;) 
+        {
+            status_printf("SPI connected: NO - SPI frequency setting failed.\r\n");
+            process_cli();
+            cyhal_system_delay_ms(1000);
+        }
+    }
+    status_printf("Debug: SPI frequency set.\r\n");
+
+    /* Enable the LDO. */
+    // result = cyhal_gpio_init(PIN_XENSIV_BGT60TRXX_LDO_EN,
+    //                          CYHAL_GPIO_DIR_OUTPUT,
+    //                          CYHAL_GPIO_DRIVE_STRONG,
+    //                          true);
+    // CY_ASSERT(result == CY_RSLT_SUCCESS);
+
+    /* Wait LDO stable */
+    (void)cyhal_system_delay_ms(5);
+
+    status_printf("Debug: Initializing Radar Sensor...\r\n");
+    result = xensiv_bgt60trxx_mtb_init(&sensor,
+                                       &cyhal_spi,
+                                       PIN_XENSIV_BGT60TRXX_SPI_CSN,
+                                       PIN_XENSIV_BGT60TRXX_RSTN,
+                                       register_list,
+                                       XENSIV_BGT60TRXX_CONF_NUM_REGS);
+    
+    if (result != CY_RSLT_SUCCESS)
+    {
+        for(;;) 
+        {
+            status_printf("SPI connected: NO - Radar initialization failed. Error: 0x%08lX\r\n", (unsigned long)result);
+            process_cli();
+            cyhal_system_delay_ms(1000);
+        }
+    }
+    status_printf("Debug: Radar Sensor Initialized.\r\n");
+
+    status_printf("Debug: Initializing Interrupts...\r\n");
+    /* The sensor will generate an interrupt once the sensor FIFO level is
+       NUM_SAMPLES_PER_FRAME */
+    result = xensiv_bgt60trxx_mtb_interrupt_init(&sensor,
+                                                 NUM_SAMPLES_PER_FRAME,
+                                                 PIN_XENSIV_BGT60TRXX_IRQ,
+                                                 CYHAL_ISR_PRIORITY_DEFAULT,
+                                                 xensiv_bgt60trxx_mtb_interrupt_handler,
+                                                 NULL);
+    
+    if (result != CY_RSLT_SUCCESS)
+    {
+        for(;;) 
+        {
+            status_printf("SPI connected: NO - Interrupt initialization failed. Error: 0x%08lX\r\n", (unsigned long)result);
+            process_cli();
+            cyhal_system_delay_ms(1000);
+        }
+    }
+    status_printf("Debug: Interrupts Initialized.\r\n");
+
+    status_printf("Debug: Stopping/Idling Frame...\r\n");
+    /* Ensure acquisition is idle until commanded via CLI */
+    if (xensiv_bgt60trxx_start_frame(&sensor.dev, false) != XENSIV_BGT60TRXX_STATUS_OK)
+    {
+        for(;;) 
+        {
+            status_printf("SPI connected: NO - Failed to initialize frame acquisition.\r\n");
+            process_cli();
+            cyhal_system_delay_ms(1000);
+        }
+    }
+    status_printf("Debug: Frame Idled.\r\n");
+
+    radar_initialized = true;
+    status_printf("SPI connected: YES\r\n");
+    status_printf("Ready. Type 'start' [frames] or 'stop' followed by Enter.\r\n");
 
     uint32_t frame_idx = 0;
-    bool error_reported = false;
 
-    for (;;)
+    for(;;)
     {
-        /* Wait for configuration */
-        if ((USBD_GetState() & USB_STAT_CONFIGURED) != USB_STAT_CONFIGURED)
-        {
-            cyhal_system_delay_ms(USB_CONFIG_DELAY);
-            continue;
+        if (!capture_enabled) {
+            process_cli();
         }
-
-        if (!radar_initialized && !error_reported)
-        {
-            for (int i = 0; i < 3; i++)
-            {
-                status_printf("NO SPI CONNECTED\r\n");
-                cyhal_system_delay_ms(1000);
-            }
-            error_reported = true;
-        }
-
-        process_cli();
 
         if (!capture_enabled)
         {
-            cyhal_system_delay_ms(1);
-            continue;
-        }
-
-        if (!radar_initialized)
-        {
-            status_printf("Cannot start capture: Radar not initialized.\r\n");
-            capture_enabled = false;
+            cyhal_system_delay_ms(10);
             continue;
         }
 
         /* Wait for the radar device to indicate the availability of the data to fetch. */
+        uint32_t wait_count = 0;
+        
         while ((capture_enabled == true) && (data_available == false))
         {
-            process_cli();
-            /* Check USB state to avoid hanging if disconnected */
-            if ((USBD_GetState() & USB_STAT_CONFIGURED) != USB_STAT_CONFIGURED)
+            // process_cli();
+            cyhal_system_delay_ms(1);
+            wait_count++;
+            if (wait_count % 200 == 0)
             {
-                capture_enabled = false;
-                break;
+                 // bool irq_state = cyhal_gpio_read(PIN_XENSIV_BGT60TRXX_IRQ);
+                 // status_printf("Waiting... IRQ: %d, Count: %lu\r\n", irq_state, wait_count);
+                 cyhal_gpio_toggle(LED1);
             }
-        }
-
-        if (!capture_enabled)
-        {
-            continue;
         }
 
         if (!capture_enabled)
@@ -259,7 +348,7 @@ int main(void)
         {
             send_frame_binary(frame_idx);
             frame_idx++;
-            cyhal_gpio_toggle(CYBSP_USER_LED);
+            cyhal_gpio_toggle(LED1);
 
             if (frame_limit_enabled)
             {
@@ -293,8 +382,15 @@ int main(void)
 
 static void status_printf(const char *fmt, ...)
 {
-    if (fmt == NULL) return;
-    if (binary_stream_active) return;
+    if (fmt == NULL)
+    {
+        return;
+    }
+
+    // if (binary_stream_active)
+    // {
+    //     return;
+    // }
 
     char buffer[128];
     va_list args;
@@ -302,7 +398,7 @@ static void status_printf(const char *fmt, ...)
     vsnprintf(buffer, sizeof(buffer), fmt, args);
     va_end(args);
 
-    USBD_CDC_Write(usb_cdcHandle, buffer, strlen(buffer), 0);
+    USBD_CDC_Write(usb_cdcHandle, (uint8_t *)buffer, strlen(buffer), 0);
 }
 
 static void send_frame_binary(uint32_t frame_idx)
@@ -315,51 +411,70 @@ static void send_frame_binary(uint32_t frame_idx)
         .sample_count = NUM_SAMPLES_PER_FRAME
     };
 
-    USBD_CDC_Write(usb_cdcHandle, &header, sizeof(header), 0);
-    USBD_CDC_Write(usb_cdcHandle, samples, sizeof(samples[0]) * NUM_SAMPLES_PER_FRAME, 0);
+    if (USBD_CDC_Write(usb_cdcHandle, (uint8_t *)&header, sizeof(header), 0) != sizeof(header))
+    {
+        binary_stream_active = false;
+        capture_enabled = false;
+        frame_limit_enabled = false;
+        status_printf("Failed to write frame header.\r\n");
+        return;
+    }
+
+    if (USBD_CDC_Write(usb_cdcHandle, (uint8_t *)samples, sizeof(samples[0]) * NUM_SAMPLES_PER_FRAME, 0) != sizeof(samples[0]) * NUM_SAMPLES_PER_FRAME)
+    {
+        binary_stream_active = false;
+        capture_enabled = false;
+        frame_limit_enabled = false;
+        status_printf("Failed to write frame payload.\r\n");
+        return;
+    }
 }
 
 static void process_cli(void)
 {
     static char cmd_buffer[32];
     static uint32_t cmd_index = 0;
-    char ch;
+    uint8_t ch = 0;
+    int loop_safety = 0;
 
     /* Try to read a byte from USB CDC (non-blocking) */
-    if (USBD_CDC_Read(usb_cdcHandle, &ch, 1, 0) == 1)
+    while (USBD_CDC_Read(usb_cdcHandle, &ch, 1, 0) == 1)
     {
-        /* Echo back */
-        USBD_CDC_Write(usb_cdcHandle, &ch, 1, 0);
+        loop_safety++;
+        if (loop_safety > 1000) {
+             status_printf("Debug: process_cli stuck, breaking.\r\n");
+             break;
+        }
 
         if ((ch == '\r') || (ch == '\n'))
         {
             if (cmd_index > 0)
             {
                 cmd_buffer[cmd_index] = '\0';
-
-                if (!radar_initialized && (strncmp(cmd_buffer, "start", 5) == 0) &&
-                    ((cmd_buffer[5] == '\0') || (cmd_buffer[5] == ' ') || (cmd_buffer[5] == '\t')))
-                {
-                    USBD_CDC_Write(usb_cdcHandle, " No SPI found", 13, 0);
-                }
-
-                USBD_CDC_Write(usb_cdcHandle, "\r\n", 2, 0); /* New line for echo */
+                USBD_CDC_Write(usb_cdcHandle, (uint8_t *)"\r\n", 2, 0);
                 handle_command(cmd_buffer);
                 cmd_index = 0;
+                
+                if (capture_enabled) {
+                    break;
+                }
             }
         }
         else
         {
             if (cmd_index < (sizeof(cmd_buffer) - 1))
             {
-                cmd_buffer[cmd_index++] = ch;
+                cmd_buffer[cmd_index++] = (char)ch;
             }
             else
             {
+                /* Command too long; reset buffer */
                 cmd_index = 0;
             }
         }
     }
+    // status_printf("Debug: process_cli exiting.\r\n");
+    // cyhal_system_delay_ms(10);
 }
 
 static bool parse_frame_count_argument(const char *arg, uint32_t *out_value)
@@ -426,6 +541,7 @@ static void handle_command(const char *cmd)
     {
         if (!radar_initialized)
         {
+            status_printf("Error: Radar not initialized.\r\n");
             return;
         }
 
@@ -463,6 +579,9 @@ static void handle_command(const char *cmd)
             }
 
             binary_stream_active = true;
+            // status_printf("Debug: handle_command returning.\r\n");
+            cyhal_gpio_write(LED1, 1); // Force LED ON
+            cyhal_system_delay_ms(10);
         }
         else
         {
@@ -510,17 +629,6 @@ static void handle_command(const char *cmd)
     {
         status_printf("Unknown command: %s\r\n", cmd);
     }
-}
-
-#if defined(CYHAL_API_VERSION) && (CYHAL_API_VERSION >= 2)
-void xensiv_bgt60trxx_mtb_interrupt_handler(void *args, cyhal_gpio_event_t event)
-#else
-void xensiv_bgt60trxx_mtb_interrupt_handler(void *args, cyhal_gpio_irq_event_t event)
-#endif
-{
-    CY_UNUSED_PARAMETER(args);
-    CY_UNUSED_PARAMETER(event);
-    data_available = true;
 }
 
 void usb_add_cdc(void) {
