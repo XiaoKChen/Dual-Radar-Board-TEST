@@ -9,6 +9,16 @@
 #include <limits.h>
 #include <stdarg.h>
 #include <string.h>
+#include <math.h>
+#define ARM_MATH_CM4
+#include "arm_math.h"
+#include "dsp/transform_functions.h"
+#include "dsp/complex_math_functions.h"
+#include "dsp/fast_math_functions.h"
+
+#ifndef PI
+#define PI 3.14159265358979f
+#endif
 
 #include "xensiv_bgt60trxx_mtb.h"
 
@@ -99,6 +109,7 @@ static uint32_t frame_limit_total = 0U;
 static uint32_t frame_limit_sent = 0U;
 static bool binary_stream_active = false;
 static bool radar_initialized = false;
+static bool test_mode_active = false;
 
 /* Allocate enough memory for the radar dara frame. */
 static uint16_t samples[NUM_SAMPLES_PER_FRAME];
@@ -141,6 +152,177 @@ void xensiv_bgt60trxx_mtb_interrupt_handler(void *args, cyhal_gpio_irq_event_t e
     CY_UNUSED_PARAMETER(args);
     CY_UNUSED_PARAMETER(event);
     data_available = true;
+}
+
+#define RADAR_C 3e8f
+#define RADAR_FC 60e9f
+#define RADAR_LAMBDA (RADAR_C / RADAR_FC)
+#define RADAR_D (RADAR_LAMBDA / 2.0f)
+#define RADAR_FS 720000.0f
+#define RADAR_S (460e6f / 200e-6f)
+
+static float32_t radar_cube[32][3][128]; 
+static float32_t range_profile[64];
+static float32_t chirp_buffer[128];
+static float32_t fft_output[128];
+static float32_t window[128];
+static bool window_init = false;
+
+static void init_window(void) {
+    for(int i=0; i<128; i++) {
+        window[i] = 0.5f * (1.0f - arm_cos_f32(2 * PI * i / 127.0f));
+    }
+    window_init = true;
+}
+
+static uint32_t test_counter = 0;
+
+static void run_radar_test(void) {
+    status_printf("Debug: run_radar_test started\r\n");
+    
+    if (xensiv_bgt60trxx_start_frame(&sensor.dev, true) != XENSIV_BGT60TRXX_STATUS_OK) {
+        status_printf("Error starting frame\r\n");
+        return;
+    }
+    
+    uint32_t timeout = 2000;
+    while (!data_available && timeout > 0) { 
+        cyhal_system_delay_ms(1);
+        timeout--;
+    }
+    
+    if (!data_available) {
+        status_printf("Timeout waiting for data\r\n");
+        xensiv_bgt60trxx_start_frame(&sensor.dev, false);
+        return;
+    }
+    data_available = false;
+    
+    status_printf("Debug: Data received, reading FIFO...\r\n");
+    
+    if (xensiv_bgt60trxx_get_fifo_data(&sensor.dev, samples, NUM_SAMPLES_PER_FRAME) != XENSIV_BGT60TRXX_STATUS_OK) {
+        status_printf("Error reading FIFO\r\n");
+        xensiv_bgt60trxx_start_frame(&sensor.dev, false);
+        return;
+    }
+
+    if (!window_init) init_window();
+    
+    status_printf("Debug: Processing...\r\n");
+    
+    arm_rfft_fast_instance_f32 S;
+    if (arm_rfft_fast_init_f32(&S, 128) != ARM_MATH_SUCCESS) {
+        status_printf("Error initializing RFFT\r\n");
+        xensiv_bgt60trxx_start_frame(&sensor.dev, false);
+        return;
+    }
+    
+    memset(range_profile, 0, sizeof(range_profile));
+    
+    int num_chirps = 32;
+    int num_samples_per_chirp = 128;
+    int num_rx = 3;
+    
+    for (int c = 0; c < num_chirps; c++) {
+        for (int r = 0; r < num_rx; r++) {
+            float32_t mean = 0;
+            for (int s = 0; s < num_samples_per_chirp; s++) {
+                int idx = (c * num_samples_per_chirp + s) * num_rx + r;
+                chirp_buffer[s] = (float32_t)samples[idx];
+                mean += chirp_buffer[s];
+            }
+            mean /= num_samples_per_chirp;
+            
+            for (int s = 0; s < num_samples_per_chirp; s++) {
+                chirp_buffer[s] -= mean;
+                chirp_buffer[s] *= window[s];
+            }
+            
+            arm_rfft_fast_f32(&S, chirp_buffer, fft_output, 0);
+            
+            for (int k = 1; k < 64; k++) {
+                float32_t re = fft_output[2*k];
+                float32_t im = fft_output[2*k+1];
+                float32_t mag2 = re*re + im*im;
+                range_profile[k] += mag2;
+                
+                radar_cube[c][r][2*k] = re;
+                radar_cube[c][r][2*k+1] = im;
+            }
+        }
+    }
+    
+    float32_t max_val = 0;
+    int peak_idx = 0;
+    for (int k = 1; k < 64; k++) {
+        if (range_profile[k] > max_val) {
+            max_val = range_profile[k];
+            peak_idx = k;
+        }
+    }
+    
+    float32_t range_m = peak_idx * (RADAR_C * RADAR_FS) / (2 * RADAR_S * 128.0f);
+    
+    arm_cfft_instance_f32 S_dop;
+    if (arm_cfft_init_f32(&S_dop, 32) != ARM_MATH_SUCCESS) {
+        status_printf("Error initializing CFFT\r\n");
+        xensiv_bgt60trxx_start_frame(&sensor.dev, false);
+        return;
+    }
+    
+    float32_t doppler_spectrum[32][3][2];
+    
+    for (int r = 0; r < num_rx; r++) {
+        float32_t dop_input[64];
+        for (int c = 0; c < 32; c++) {
+            dop_input[2*c] = radar_cube[c][r][2*peak_idx];
+            dop_input[2*c+1] = radar_cube[c][r][2*peak_idx+1];
+        }
+        
+        arm_cfft_f32(&S_dop, dop_input, 0, 1);
+        
+        for (int d = 0; d < 32; d++) {
+            doppler_spectrum[d][r][0] = dop_input[2*d];
+            doppler_spectrum[d][r][1] = dop_input[2*d+1];
+        }
+    }
+    
+    float32_t max_dop_val = 0;
+    int peak_dop_idx = 0;
+    for (int d = 0; d < 32; d++) {
+        float32_t mag = 0;
+        for (int r = 0; r < num_rx; r++) {
+            float32_t re = doppler_spectrum[d][r][0];
+            float32_t im = doppler_spectrum[d][r][1];
+            mag += re*re + im*im;
+        }
+        if (mag > max_dop_val) {
+            max_dop_val = mag;
+            peak_dop_idx = d;
+        }
+    }
+    
+    float32_t z[3][2];
+    for(int r=0; r<3; r++) {
+        z[r][0] = doppler_spectrum[peak_dop_idx][r][0];
+        z[r][1] = doppler_spectrum[peak_dop_idx][r][1];
+    }
+    
+    float32_t d1_re = z[1][0]*z[0][0] + z[1][1]*z[0][1];
+    float32_t d1_im = z[1][1]*z[0][0] - z[1][0]*z[0][1];
+    float32_t phi1 = atan2f(d1_im, d1_re);
+    
+    float32_t d2_re = z[2][0]*z[1][0] + z[2][1]*z[1][1];
+    float32_t d2_im = z[2][1]*z[1][0] - z[2][0]*z[1][1];
+    float32_t phi2 = atan2f(d2_im, d2_re);
+    
+    float32_t avg_phi = (phi1 + phi2) / 2.0f;
+    float32_t aoa_rad = asinf(avg_phi / PI);
+    float32_t aoa_deg = aoa_rad * 180.0f / PI;
+    
+    status_printf("Range: %.2f m, AoA: %.2f deg\r\n", range_m, aoa_deg);
+    
+    xensiv_bgt60trxx_start_frame(&sensor.dev, false);
 }
 
 int main(void)
@@ -312,6 +494,16 @@ int main(void)
     {
         if (!capture_enabled) {
             process_cli();
+        }
+        
+        if (test_mode_active) {
+             test_counter += 10;
+             if (test_counter >= 3000) {
+                 run_radar_test();
+                 test_counter = 0;
+             }
+             cyhal_system_delay_ms(10);
+             continue;
         }
 
         if (!capture_enabled)
@@ -604,6 +796,12 @@ static void handle_command(const char *cmd)
             return;
         }
 
+        if (test_mode_active) {
+            test_mode_active = false;
+            status_printf("Test mode stopped.\r\n");
+            return;
+        }
+
         if (!capture_enabled)
         {
             status_printf("Capture already stopped.\r\n");
@@ -623,6 +821,29 @@ static void handle_command(const char *cmd)
         else
         {
             status_printf("Failed to stop capture.\r\n");
+        }
+    }
+    else if ((strncmp(cmd, "test", 4) == 0) &&
+             ((cmd[4] == '\0') || (cmd[4] == ' ') || (cmd[4] == '\t')))
+    {
+        if (!radar_initialized)
+        {
+            status_printf("Error: Radar not initialized.\r\n");
+            return;
+        }
+        
+        if (capture_enabled)
+        {
+            status_printf("Stop capture first.\r\n");
+            return;
+        }
+        
+        test_mode_active = !test_mode_active;
+        if (test_mode_active) {
+            status_printf("Test mode started. Range/AoA every 3s.\r\n");
+            test_counter = 3000;
+        } else {
+            status_printf("Test mode stopped.\r\n");
         }
     }
     else if (*cmd != '\0')
