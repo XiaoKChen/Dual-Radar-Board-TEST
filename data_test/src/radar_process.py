@@ -59,14 +59,17 @@ plot_RD_map     = True
 plot_DBF        = True    # plot beampattern for first detected target
 
 # %% --------- Radar Parameters ---------
-c       = 3e8           # speed of light (m/s)
-fc      = 60e9          # carrier frequency (Hz)
-B       = 460e6         # chirp bandwidth (Hz)
-Tchirp  = 200e-6        # chirp duration (s)
-S       = B / Tchirp    # chirp slope (Hz/s)
-fs      = 0.72e6        # ADC sampling rate (Hz)
-lam     = c / fc        # wavelength (m)
-d       = lam / 2       # RX element spacing
+fc_start = 61020099000.0
+fc_end = 61479903000.0
+fc = 0.5 * (fc_start + fc_end)
+c = 299792458.0
+B = fc_end - fc_start
+Tchirp = 6.99625e-05
+S = B / Tchirp
+fs = 0.72e6        # ADC sampling rate (Hz)
+lam = c / fc
+d = lam / 2
+fr = 1 / Tchirp
 
 # %% --------- SIM Targets (used if mode='sim') ---------
 R0        = np.array([1, 4, 7])         # target ranges (m)
@@ -163,8 +166,9 @@ N_half = int(np.floor(Nsample / 2))
 # Indices 1 to N_half-1 (Python slicing is exclusive at the end)
 range_indices = np.arange(1, N_half) 
 
-f_axis_half = f_axis[range_indices]
-range_axis  = (c * f_axis_half) / (2 * S)
+# Range calibration from MATLAB script
+range_res = (3 * 10**8) / (2 * (fc_end - fc_start))
+range_axis = range_indices * range_res
 
 # Range profile (first chirp, selected antenna)
 range_prof = range_cube[0, range_indices, ant_idx]
