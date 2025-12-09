@@ -154,12 +154,14 @@ void xensiv_bgt60trxx_mtb_interrupt_handler(void *args, cyhal_gpio_irq_event_t e
     data_available = true;
 }
 
-#define RADAR_C 3e8f
-#define RADAR_FC 60e9f
+#define RADAR_C 299792458.0f
+#define RADAR_FC_START 61020099000.0f
+#define RADAR_FC_END 61479903000.0f
+#define RADAR_B (RADAR_FC_END - RADAR_FC_START)
+#define RADAR_FC (0.5f * (RADAR_FC_START + RADAR_FC_END))
 #define RADAR_LAMBDA (RADAR_C / RADAR_FC)
 #define RADAR_D (RADAR_LAMBDA / 2.0f)
 #define RADAR_FS 720000.0f
-#define RADAR_S (460e6f / 200e-6f)
 
 static float32_t radar_cube[32][3][128]; 
 static float32_t range_profile[64];
@@ -261,7 +263,7 @@ static void run_radar_test(void) {
         }
     }
     
-    float32_t range_m = peak_idx * (RADAR_C * RADAR_FS) / (2 * RADAR_S * 128.0f);
+    float32_t range_m = peak_idx * RADAR_C / (2.0f * RADAR_B);
     
     arm_cfft_instance_f32 S_dop;
     if (arm_cfft_init_f32(&S_dop, 32) != ARM_MATH_SUCCESS) {
