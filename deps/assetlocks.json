@@ -30,5 +30,9 @@
     {
         "asset-name": "recipe-make-cat1a",
         "locked-commit": "release-v2.6.0"
+    },
+    {
+        "asset-name": "sensor-dsp",
+        "locked-commit": "release-v1.0.0"
     }
 ]

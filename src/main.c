@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "xensiv_bgt60trxx_mtb.h"
+#include "xensiv_radar_presence.h"
 
 #define XENSIV_BGT60TRXX_CONF_IMPL
 #include "presence_radar_settings.h"
@@ -56,9 +57,6 @@
                                              XENSIV_BGT60TRXX_CONF_NUM_CHIRPS_PER_FRAME *\
                                              XENSIV_BGT60TRXX_CONF_NUM_SAMPLES_PER_CHIRP)
 
-#define BINARY_FRAME_HEADER_VERSION         (1U)
-#define BINARY_FRAME_SAMPLE_SIZE_BYTES      ((uint16_t)sizeof(uint16_t))
-
 #define LED1 P10_3
 #define LED2 P10_2
 
@@ -76,15 +74,6 @@ void turn_on_leds(void)
 
 }
 
-typedef struct __attribute__((packed))
-{
-    uint8_t magic[4];
-    uint16_t version;
-    uint16_t sample_size_bytes;
-    uint32_t frame_index;
-    uint32_t sample_count;
-} binary_frame_header_t;
-
 /*******************************************************************************
 * Global variables
 ********************************************************************************/
@@ -94,19 +83,17 @@ static cyhal_spi_t cyhal_spi;
 static xensiv_bgt60trxx_mtb_t sensor;
 static volatile bool data_available = false;
 static bool capture_enabled = false;
-static bool frame_limit_enabled = false;
-static uint32_t frame_limit_total = 0U;
-static uint32_t frame_limit_sent = 0U;
-static bool binary_stream_active = false;
 static bool radar_initialized = false;
 
 /* Allocate enough memory for the radar dara frame. */
 static uint16_t samples[NUM_SAMPLES_PER_FRAME];
+static float32_t avg_chirp[XENSIV_BGT60TRXX_CONF_NUM_SAMPLES_PER_CHIRP];
 
-static bool parse_frame_count_argument(const char *arg, uint32_t *out_value);
+static xensiv_radar_presence_handle_t presence_handle;
+static xensiv_radar_presence_config_t presence_config;
+
 static void handle_command(const char *cmd);
 static void process_cli(void);
-static void send_frame_binary(uint32_t frame_idx);
 static void status_printf(const char *fmt, ...);
 #if defined(CYHAL_API_VERSION) && (CYHAL_API_VERSION >= 2)
 void xensiv_bgt60trxx_mtb_interrupt_handler(void *args, cyhal_gpio_event_t event);
@@ -119,6 +106,10 @@ void xensiv_bgt60trxx_mtb_interrupt_handler(void *args, cyhal_gpio_event_t event
 #else
 void xensiv_bgt60trxx_mtb_interrupt_handler(void *args, cyhal_gpio_irq_event_t event);
 #endif
+
+void presence_callback(xensiv_radar_presence_handle_t handle,
+                       const xensiv_radar_presence_event_t *event,
+                       void *data);
 
 /*********************************************************************
 * Information that are used during enumeration
@@ -302,11 +293,21 @@ int main(void)
     }
     status_printf("Debug: Frame Idled.\r\n");
 
+    /* Initialize Presence Radar */
+    xensiv_radar_presence_init_config(&presence_config);
+    if (xensiv_radar_presence_alloc(&presence_handle, &presence_config) != XENSIV_RADAR_PRESENCE_OK)
+    {
+        status_printf("Error: Failed to allocate presence context.\r\n");
+        for(;;);
+    }
+    xensiv_radar_presence_set_callback(presence_handle, presence_callback, NULL);
+    status_printf("Presence detection initialized.\r\n");
+
     radar_initialized = true;
     status_printf("SPI connected: YES\r\n");
-    status_printf("Ready. Type 'start' [frames] or 'stop' followed by Enter.\r\n");
+    status_printf("Ready. Type 'start' or 'stop' followed by Enter.\r\n");
 
-    uint32_t frame_idx = 0;
+    uint32_t frame_count = 0;
 
     for(;;)
     {
@@ -330,8 +331,6 @@ int main(void)
             wait_count++;
             if (wait_count % 200 == 0)
             {
-                 // bool irq_state = cyhal_gpio_read(PIN_XENSIV_BGT60TRXX_IRQ);
-                 // status_printf("Waiting... IRQ: %d, Count: %lu\r\n", irq_state, wait_count);
                  cyhal_gpio_toggle(LED1);
             }
         }
@@ -346,36 +345,44 @@ int main(void)
         if (xensiv_bgt60trxx_get_fifo_data(&sensor.dev, samples,
                                            NUM_SAMPLES_PER_FRAME) == XENSIV_BGT60TRXX_STATUS_OK)
         {
-            send_frame_binary(frame_idx);
-            frame_idx++;
-            cyhal_gpio_toggle(LED1);
-
-            if (frame_limit_enabled)
-            {
-                frame_limit_sent++;
-
-                if (frame_limit_sent >= frame_limit_total)
-                {
-                    uint32_t completed_frames = frame_limit_total;
-
-                    if (xensiv_bgt60trxx_start_frame(&sensor.dev, false) == XENSIV_BGT60TRXX_STATUS_OK)
-                    {
-                        capture_enabled = false;
-                        data_available = false;
-                        frame_limit_enabled = false;
-                        frame_limit_total = 0U;
-                        frame_limit_sent = 0U;
-                        binary_stream_active = false;
-                        status_printf("Capture completed (%" PRIu32 " frame%s).\r\n",
-                                      completed_frames,
-                                      (completed_frames == 1U) ? "" : "s");
-                    }
-                    else
-                    {
-                        status_printf("Failed to stop capture.\r\n");
-                    }
-                }
+            /* Debug: Print first few raw samples */
+            if (frame_count % 10 == 0) {
+                status_printf("Raw: %d %d %d %d %d %d %d %d %d %d %d %d\r\n",
+                    samples[0], samples[1], samples[2], samples[3], samples[4], samples[5],
+                    samples[6], samples[7], samples[8], samples[9], samples[10], samples[11]);
             }
+
+            /* Use first chirp, first antenna; scale to float */
+            for (uint32_t sample_idx = 0; sample_idx < XENSIV_BGT60TRXX_CONF_NUM_SAMPLES_PER_CHIRP; sample_idx++)
+            {
+                uint32_t raw_idx = (sample_idx * XENSIV_BGT60TRXX_CONF_NUM_RX_ANTENNAS);
+                avg_chirp[sample_idx] = ((float32_t)samples[raw_idx]) / 4096.0f;
+            }
+
+            /* Process one chirp per frame */
+            uint32_t time_ms = (uint32_t)(frame_count * XENSIV_BGT60TRXX_CONF_FRAME_REPETITION_TIME_S * 1000.0f);
+            int32_t proc_status = xensiv_radar_presence_process_frame(presence_handle, avg_chirp, time_ms);
+            if (proc_status != XENSIV_RADAR_PRESENCE_OK)
+            {
+                status_printf("Error: Presence process failed: %ld\r\n", (long)proc_status);
+            }
+
+            /* Debug: Print energy levels to confirm operation (once per frame) */
+            float macro_energy = 0.0f;
+            int macro_idx = 0;
+            float micro_energy = 0.0f;
+            int micro_idx = 0;
+            
+            xensiv_radar_presence_get_max_macro(presence_handle, &macro_energy, &macro_idx);
+            xensiv_radar_presence_get_max_micro(presence_handle, &micro_energy, &micro_idx);
+            
+            status_printf("Frame %lu: Macro: %ld (idx %d), Micro: %ld (idx %d)\r\n", 
+                          (unsigned long)frame_count, 
+                          (long)(macro_energy * 1000), macro_idx, 
+                          (long)(micro_energy * 1000), micro_idx);
+            
+            frame_count++;
+            cyhal_gpio_toggle(LED1);
         }
     }
 }
@@ -387,11 +394,6 @@ static void status_printf(const char *fmt, ...)
         return;
     }
 
-    // if (binary_stream_active)
-    // {
-    //     return;
-    // }
-
     char buffer[128];
     va_list args;
     va_start(args, fmt);
@@ -401,32 +403,24 @@ static void status_printf(const char *fmt, ...)
     USBD_CDC_Write(usb_cdcHandle, (uint8_t *)buffer, strlen(buffer), 0);
 }
 
-static void send_frame_binary(uint32_t frame_idx)
+void presence_callback(xensiv_radar_presence_handle_t handle,
+                       const xensiv_radar_presence_event_t *event,
+                       void *data)
 {
-    const binary_frame_header_t header = {
-        .magic = {'R', 'A', 'D', 'R'},
-        .version = BINARY_FRAME_HEADER_VERSION,
-        .sample_size_bytes = BINARY_FRAME_SAMPLE_SIZE_BYTES,
-        .frame_index = frame_idx,
-        .sample_count = NUM_SAMPLES_PER_FRAME
-    };
-
-    if (USBD_CDC_Write(usb_cdcHandle, (uint8_t *)&header, sizeof(header), 0) != sizeof(header))
+    (void)handle;
+    (void)data;
+    
+    if (event->state == XENSIV_RADAR_PRESENCE_STATE_MACRO_PRESENCE)
     {
-        binary_stream_active = false;
-        capture_enabled = false;
-        frame_limit_enabled = false;
-        status_printf("Failed to write frame header.\r\n");
-        return;
+        status_printf("Presence Detected: MACRO (Range Bin: %ld)\r\n", (long)event->range_bin);
     }
-
-    if (USBD_CDC_Write(usb_cdcHandle, (uint8_t *)samples, sizeof(samples[0]) * NUM_SAMPLES_PER_FRAME, 0) != sizeof(samples[0]) * NUM_SAMPLES_PER_FRAME)
+    else if (event->state == XENSIV_RADAR_PRESENCE_STATE_MICRO_PRESENCE)
     {
-        binary_stream_active = false;
-        capture_enabled = false;
-        frame_limit_enabled = false;
-        status_printf("Failed to write frame payload.\r\n");
-        return;
+        status_printf("Presence Detected: MICRO (Range Bin: %ld)\r\n", (long)event->range_bin);
+    }
+    else
+    {
+        status_printf("Presence: ABSENT\r\n");
     }
 }
 
@@ -477,53 +471,6 @@ static void process_cli(void)
     // cyhal_system_delay_ms(10);
 }
 
-static bool parse_frame_count_argument(const char *arg, uint32_t *out_value)
-{
-    if ((arg == NULL) || (out_value == NULL))
-    {
-        return false;
-    }
-
-    while ((*arg == ' ') || (*arg == '\t'))
-    {
-        ++arg;
-    }
-
-    if (*arg == '\0')
-    {
-        *out_value = 0U;
-        return true;
-    }
-
-    uint32_t value = 0U;
-
-    while ((*arg >= '0') && (*arg <= '9'))
-    {
-        uint32_t digit = (uint32_t)(*arg - '0');
-
-        if (value > ((UINT32_MAX - digit) / 10U))
-        {
-            return false;
-        }
-
-        value = (value * 10U) + digit;
-        ++arg;
-    }
-
-    while ((*arg == ' ') || (*arg == '\t'))
-    {
-        ++arg;
-    }
-
-    if (*arg != '\0')
-    {
-        return false;
-    }
-
-    *out_value = value;
-    return true;
-}
-
 static void handle_command(const char *cmd)
 {
     if (cmd == NULL)
@@ -545,17 +492,9 @@ static void handle_command(const char *cmd)
             return;
         }
 
-        uint32_t requested_frames = 0U;
-
-        if (!parse_frame_count_argument(cmd + 5, &requested_frames))
-        {
-            status_printf("Invalid frame count.\r\n");
-            return;
-        }
-
         if (capture_enabled)
         {
-            status_printf("Capture already running.\r\n");
+            status_printf("Presence detection already running.\r\n");
             return;
         }
 
@@ -563,50 +502,21 @@ static void handle_command(const char *cmd)
         {
             capture_enabled = true;
             data_available = false;
-            frame_limit_enabled = (requested_frames > 0U);
-            frame_limit_total = requested_frames;
-            frame_limit_sent = 0U;
-
-            if (frame_limit_enabled)
-            {
-                status_printf("Capture started (%" PRIu32 " frame%s).\r\n",
-                              requested_frames,
-                              (requested_frames == 1U) ? "" : "s");
-            }
-            else
-            {
-                status_printf("Capture started (continuous).\r\n");
-            }
-
-            binary_stream_active = true;
-            // status_printf("Debug: handle_command returning.\r\n");
+            status_printf("Presence detection started.\r\n");
             cyhal_gpio_write(LED1, 1); // Force LED ON
             cyhal_system_delay_ms(10);
         }
         else
         {
-            status_printf("Failed to start capture.\r\n");
+            status_printf("Failed to start presence detection.\r\n");
         }
     }
     else if ((strncmp(cmd, "stop", 4) == 0) &&
              ((cmd[4] == '\0') || (cmd[4] == ' ') || (cmd[4] == '\t')))
     {
-        const char *trailing = cmd + 4;
-
-        while ((*trailing == ' ') || (*trailing == '\t'))
-        {
-            ++trailing;
-        }
-
-        if (*trailing != '\0')
-        {
-            status_printf("Unknown command: %s\r\n", cmd);
-            return;
-        }
-
         if (!capture_enabled)
         {
-            status_printf("Capture already stopped.\r\n");
+            status_printf("Presence detection already stopped.\r\n");
             return;
         }
 
@@ -614,15 +524,11 @@ static void handle_command(const char *cmd)
         {
             capture_enabled = false;
             data_available = false;
-            frame_limit_enabled = false;
-            frame_limit_total = 0U;
-            frame_limit_sent = 0U;
-            binary_stream_active = false;
-            status_printf("Capture stopped.\r\n");
+            status_printf("Presence detection stopped.\r\n");
         }
         else
         {
-            status_printf("Failed to stop capture.\r\n");
+            status_printf("Failed to stop presence detection.\r\n");
         }
     }
     else if (*cmd != '\0')
