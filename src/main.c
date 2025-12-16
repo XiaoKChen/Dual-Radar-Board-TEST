@@ -10,16 +10,8 @@
 #include <stdarg.h>
 #include <string.h>
 #include <math.h>
-#define ARM_MATH_CM4
-#include "arm_math.h"
-#include "dsp/transform_functions.h"
-#include "dsp/complex_math_functions.h"
-#include "dsp/fast_math_functions.h"
 
-#ifndef PI
-#define PI 3.14159265358979f
-#endif
-
+#include "presence_detection.h"
 #include "xensiv_bgt60trxx_mtb.h"
 
 #define XENSIV_BGT60TRXX_CONF_IMPL
@@ -53,15 +45,6 @@
 #define LED1 P10_3
 #define LED2 P10_2
 
-#define RADAR_C 299792458.0f
-#define RADAR_FC_START 61020099000.0f
-#define RADAR_FC_END 61479903000.0f
-#define RADAR_B (RADAR_FC_END - RADAR_FC_START)
-#define RADAR_FC (0.5f * (RADAR_FC_START + RADAR_FC_END))
-#define RADAR_LAMBDA (RADAR_C / RADAR_FC)
-#define RADAR_D (RADAR_LAMBDA / 2.0f)
-#define RADAR_FS 720000.0f
-
 /*******************************************************************************
 * Global variables
 ********************************************************************************/
@@ -71,6 +54,10 @@ static cyhal_spi_t cyhal_spi;
 static xensiv_bgt60trxx_mtb_t sensor1;
 static xensiv_bgt60trxx_mtb_t sensor2;
 
+// Presence Detectors
+static presence_detector_t detector1;
+static presence_detector_t detector2;
+
 static volatile bool data_available_1 = false;
 static volatile bool data_available_2 = false;
 
@@ -79,21 +66,15 @@ static bool sequence_running = true;
 /* Allocate enough memory for the radar dara frame. */
 static uint16_t samples[NUM_SAMPLES_PER_FRAME];
 
-static float32_t radar_cube[32][3][128]; 
-static float32_t range_profile[64];
-static float32_t chirp_buffer[128];
-static float32_t fft_output[128];
-static float32_t window[128];
-static bool window_init = false;
+// Averaged chirp buffer for processing
+static float32_t averaged_chirp[XENSIV_BGT60TRXX_CONF_NUM_SAMPLES_PER_CHIRP];
 
 /*******************************************************************************
 * Function Prototypes
 ********************************************************************************/
 static void status_printf(const char *fmt, ...);
-static void process_usb_input(void);
 static void usb_add_cdc(void);
-static void init_window(void);
-static void run_radar_sequence(xensiv_bgt60trxx_mtb_t *sensor_obj, volatile bool *data_flag, const char *name);
+static void run_radar_sequence(xensiv_bgt60trxx_mtb_t *sensor_obj, volatile bool *data_flag, presence_detector_t* detector, uint32_t time_ms, const char *name);
 static cy_rslt_t init_dual_radars(void);
 
 #if defined(CYHAL_API_VERSION) && (CYHAL_API_VERSION >= 2)
@@ -136,13 +117,6 @@ void radar2_irq_handler(void *args, cyhal_gpio_irq_event_t event)
     CY_UNUSED_PARAMETER(args);
     CY_UNUSED_PARAMETER(event);
     data_available_2 = true;
-}
-
-static void init_window(void) {
-    for(int i=0; i<128; i++) {
-        window[i] = 0.5f * (1.0f - arm_cos_f32(2 * PI * i / 127.0f));
-    }
-    window_init = true;
 }
 
 static cy_rslt_t init_dual_radars(void) {
@@ -232,167 +206,81 @@ static cy_rslt_t init_dual_radars(void) {
     cyhal_gpio_write(PIN_RADAR1_CS, 1);
     cyhal_gpio_write(PIN_RADAR2_CS, 1);
 
+    // Initialize Presence Detectors
+    presence_init(&detector1);
+    presence_init(&detector2);
+
     return rslt;
 }
 
-static void run_radar_sequence(xensiv_bgt60trxx_mtb_t *sensor_obj, volatile bool *data_flag, const char *name) {
-    status_printf("\r\n--- %s: START ---\r\n", name);
-    cyhal_system_delay_ms(50);
-    
+static void run_radar_sequence(xensiv_bgt60trxx_mtb_t *sensor_obj, volatile bool *data_flag, presence_detector_t* detector, uint32_t time_ms, const char *name) {
     /* Clear the data flag */
     *data_flag = false;
 
     /* Start frame acquisition */
-    status_printf("%s: Starting frame acquisition...\r\n", name);
-    cyhal_system_delay_ms(50);
-    
     int32_t res = xensiv_bgt60trxx_start_frame(&sensor_obj->dev, true);
     if (res != XENSIV_BGT60TRXX_STATUS_OK) {
-        status_printf("%s: ERROR starting frame: %ld\r\n", name, (long)res);
-        cyhal_system_delay_ms(50);
+        // status_printf("%s: ERROR starting frame: %ld\r\n", name, (long)res);
         return;
     }
     
-    status_printf("%s: Waiting for data...\r\n", name);
-    cyhal_system_delay_ms(50);
-    
     /* Wait for interrupt with timeout */
-    uint32_t timeout = 3000;
+    uint32_t timeout = 50; // Reduced timeout for continuous loop
     while (!(*data_flag) && timeout > 0) { 
         cyhal_system_delay_ms(1);
         timeout--;
     }
     
     if (!(*data_flag)) {
-        status_printf("%s: TIMEOUT - No data received\r\n", name);
-        cyhal_system_delay_ms(50);
+        // status_printf("%s: TIMEOUT - No data received\r\n", name);
         xensiv_bgt60trxx_start_frame(&sensor_obj->dev, false);
         return;
     }
     
-    /* Data received, stop frame */
-    status_printf("%s: Data received, stopping frame\r\n", name);
-    cyhal_system_delay_ms(50);
+    /* Data received, stop frame (not strictly necessary for soft trigger but good practice) */
     xensiv_bgt60trxx_start_frame(&sensor_obj->dev, false);
     
     if (xensiv_bgt60trxx_get_fifo_data(&sensor_obj->dev, samples, NUM_SAMPLES_PER_FRAME) != XENSIV_BGT60TRXX_STATUS_OK) {
-        status_printf("Error reading FIFO from %s\r\n", name);
+        // status_printf("Error reading FIFO from %s\r\n", name);
         return;
     }
 
-    if (!window_init) init_window();
+    // Process Data
+    // Average Chirps: The settings have 32 chirps per frame.
+    // XENSIV_BGT60TRXX_CONF_NUM_CHIRPS_PER_FRAME = 32
+    // XENSIV_BGT60TRXX_CONF_NUM_SAMPLES_PER_CHIRP = 128
+    // XENSIV_BGT60TRXX_CONF_NUM_RX_ANTENNAS = 1
     
-    // status_printf("Processing %s data...\r\n", name);
+    // Reset average buffer
+    memset(averaged_chirp, 0, sizeof(averaged_chirp));
     
-    arm_rfft_fast_instance_f32 S;
-    if (arm_rfft_fast_init_f32(&S, 128) != ARM_MATH_SUCCESS) {
-        status_printf("Error initializing RFFT\r\n");
-        return;
-    }
+    int num_chirps = XENSIV_BGT60TRXX_CONF_NUM_CHIRPS_PER_FRAME;
+    int samples_per_chirp = XENSIV_BGT60TRXX_CONF_NUM_SAMPLES_PER_CHIRP;
     
-    memset(range_profile, 0, sizeof(range_profile));
-    
-    int num_chirps = 32;
-    int num_samples_per_chirp = 128;
-    int num_rx = 3;
-    
-    for (int c = 0; c < num_chirps; c++) {
-        for (int r = 0; r < num_rx; r++) {
-            float32_t mean = 0;
-            for (int s = 0; s < num_samples_per_chirp; s++) {
-                int idx = (c * num_samples_per_chirp + s) * num_rx + r;
-                chirp_buffer[s] = (float32_t)samples[idx];
-                mean += chirp_buffer[s];
-            }
-            mean /= num_samples_per_chirp;
-            
-            for (int s = 0; s < num_samples_per_chirp; s++) {
-                chirp_buffer[s] -= mean;
-                chirp_buffer[s] *= window[s];
-            }
-            
-            arm_rfft_fast_f32(&S, chirp_buffer, fft_output, 0);
-            
-            for (int k = 1; k < 64; k++) {
-                float32_t re = fft_output[2*k];
-                float32_t im = fft_output[2*k+1];
-                float32_t mag2 = re*re + im*im;
-                range_profile[k] += mag2;
-                
-                radar_cube[c][r][2*k] = re;
-                radar_cube[c][r][2*k+1] = im;
-            }
+    float32_t overall_mean = 0.0f;
+
+    for (int s = 0; s < samples_per_chirp; s++) {
+        float32_t sum = 0.0f;
+        for (int c = 0; c < num_chirps; c++) {
+            // samples layout: [chirp0_s0, chirp0_s1... chirp1_s0...]
+            sum += (float32_t)samples[c * samples_per_chirp + s];
         }
+        averaged_chirp[s] = sum / (float32_t)num_chirps;
+        overall_mean += averaged_chirp[s];
     }
     
-    float32_t max_val = 0;
-    int peak_idx = 0;
-    for (int k = 1; k < 64; k++) {
-        if (range_profile[k] > max_val) {
-            max_val = range_profile[k];
-            peak_idx = k;
-        }
+    overall_mean /= (float32_t)samples_per_chirp;
+    
+    // Remove DC component (Mean Removal)
+    for (int s = 0; s < samples_per_chirp; s++) {
+        averaged_chirp[s] -= overall_mean;
     }
     
-    float32_t range_m = peak_idx * RADAR_C / (2.0f * RADAR_B);
+    // Run Presence Detection
+    presence_result_t result;
+    presence_process(detector, averaged_chirp, time_ms, &result);
     
-    arm_cfft_instance_f32 S_dop;
-    if (arm_cfft_init_f32(&S_dop, 32) != ARM_MATH_SUCCESS) {
-        status_printf("Error initializing CFFT\r\n");
-        return;
-    }
-    
-    float32_t doppler_spectrum[32][3][2];
-    
-    for (int r = 0; r < num_rx; r++) {
-        float32_t dop_input[64];
-        for (int c = 0; c < 32; c++) {
-            dop_input[2*c] = radar_cube[c][r][2*peak_idx];
-            dop_input[2*c+1] = radar_cube[c][r][2*peak_idx+1];
-        }
-        
-        arm_cfft_f32(&S_dop, dop_input, 0, 1);
-        
-        for (int d = 0; d < 32; d++) {
-            doppler_spectrum[d][r][0] = dop_input[2*d];
-            doppler_spectrum[d][r][1] = dop_input[2*d+1];
-        }
-    }
-    
-    float32_t max_dop_val = 0;
-    int peak_dop_idx = 0;
-    for (int d = 0; d < 32; d++) {
-        float32_t mag = 0;
-        for (int r = 0; r < num_rx; r++) {
-            float32_t re = doppler_spectrum[d][r][0];
-            float32_t im = doppler_spectrum[d][r][1];
-            mag += re*re + im*im;
-        }
-        if (mag > max_dop_val) {
-            max_dop_val = mag;
-            peak_dop_idx = d;
-        }
-    }
-    
-    float32_t z[3][2];
-    for(int r=0; r<3; r++) {
-        z[r][0] = doppler_spectrum[peak_dop_idx][r][0];
-        z[r][1] = doppler_spectrum[peak_dop_idx][r][1];
-    }
-    
-    float32_t d1_re = z[1][0]*z[0][0] + z[1][1]*z[0][1];
-    float32_t d1_im = z[1][1]*z[0][0] - z[1][0]*z[0][1];
-    float32_t phi1 = atan2f(d1_im, d1_re);
-    
-    float32_t d2_re = z[2][0]*z[1][0] + z[2][1]*z[1][1];
-    float32_t d2_im = z[2][1]*z[1][0] - z[2][0]*z[1][1];
-    float32_t phi2 = atan2f(d2_im, d2_re);
-    
-    float32_t avg_phi = (phi1 + phi2) / 2.0f;
-    float32_t aoa_rad = asinf(avg_phi / PI);
-    float32_t aoa_deg = aoa_rad * 180.0f / PI;
-    
-    status_printf("[%s] Range: %.2f m, AoA: %.2f deg\r\n", name, range_m, aoa_deg);
+    // Note: We don't print here anymore.
 }
 
 int main(void)
@@ -433,7 +321,7 @@ int main(void)
     status_printf("USB configured.\r\n");
     cyhal_system_delay_ms(500);
 
-    status_printf("Dual Radar Example\r\n");
+    status_printf("Dual Radar Presence Detection\r\n");
 
     status_printf("Debug: Initializing SPI...\r\n");
     /* Initialize the SPI interface to BGT60. */
@@ -479,31 +367,50 @@ int main(void)
         for(;;) {}
     }
     status_printf("Dual Radars Initialized.\r\n");
-    status_printf("Starting sequence loop (Radar 1 -> Radar 2 -> Wait 3s).\r\n");
+    status_printf("Starting presence detection loop...\r\n");
     cyhal_system_delay_ms(100);
 
-    uint32_t loop_count = 0;
+    uint32_t current_time_ms = 0;
+    uint32_t last_print_time = 0;
+    const uint32_t FRAME_INTERVAL_MS = 50; // 20Hz
+
     for(;;)
     {
-        loop_count++;
-
         if (sequence_running) {
-            /* Toggle LED to show activity */
             cyhal_gpio_write(LED1, 1);
             
-            status_printf("\r\n=== CYCLE %lu START ===\r\n", loop_count);
+            // Radar 1
+            run_radar_sequence(&sensor1, &data_available_1, &detector1, current_time_ms, "Radar 1");
             
-            /* RADAR 1: ON -> Capture -> OFF -> Process */
-            run_radar_sequence(&sensor1, &data_available_1, "Radar 1");
-            cyhal_system_delay_ms(200); /* Delay between radars */
+            // Radar 2
+            run_radar_sequence(&sensor2, &data_available_2, &detector2, current_time_ms, "Radar 2");
             
-            /* RADAR 2: ON -> Capture -> OFF -> Process */
-            run_radar_sequence(&sensor2, &data_available_2, "Radar 2");
+            // Increment Time
+            current_time_ms += FRAME_INTERVAL_MS;
             
-            status_printf("\r\n=== Cycle %lu complete, waiting 3s ===\r\n", loop_count);
+            // Check for Print Interval (3 seconds)
+            if (current_time_ms - last_print_time >= 3000) {
+                
+                const char* state1_str = (detector1.state == PRESENCE_STATE_ABSENCE) ? "ABSENCE" : 
+                                         (detector1.state == PRESENCE_STATE_MACRO_PRESENCE) ? "MACRO" : "MICRO";
+                
+                const char* state2_str = (detector2.state == PRESENCE_STATE_ABSENCE) ? "ABSENCE" : 
+                                         (detector2.state == PRESENCE_STATE_MACRO_PRESENCE) ? "MACRO" : "MICRO";
+                
+                status_printf("Time: %lu ms | R1: %s (%.2fm) | R2: %s (%.2fm)\r\n", 
+                              (unsigned long)current_time_ms, 
+                              state1_str, detector1.range_m, 
+                              state2_str, detector2.range_m);
+                
+                last_print_time = current_time_ms;
+            }
             
             cyhal_gpio_write(LED1, 0);
-            cyhal_system_delay_ms(3000);
+            
+            // Optional: small delay to not hog CPU/Bus completely, though we want max speed to meet 50ms if possible.
+            // If the acquisition takes > 50ms, this loop runs slower than real time 20Hz.
+            cyhal_system_delay_ms(1); 
+            
         } else {
             cyhal_system_delay_ms(100);
         }
