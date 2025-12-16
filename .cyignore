@@ -6,6 +6,7 @@ templates
 .mtbLaunchConfigs
 .settings
 .vscode
+Infineon-BGT60TR13C-Presence-Detection
 
 # Python
 data_test

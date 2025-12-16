@@ -10,9 +10,25 @@
 #include <stdarg.h>
 #include <string.h>
 #include <math.h>
+#include <complex.h>
+#include <stdbool.h>
+#define ARM_MATH_CM4
+#include "arm_math.h"
+#include "dsp/transform_functions.h"
+#include "dsp/complex_math_functions.h"
+#include "dsp/fast_math_functions.h"
+#include "dsp/filtering_functions.h"
 
-#include "presence_detection.h"
+#ifndef PI
+#define PI 3.14159265358979f
+#endif
+
 #include "xensiv_bgt60trxx_mtb.h"
+
+#include "FreeRTOS.h"
+#include "task.h"
+#include "queue.h"
+#include "semphr.h"
 
 #define XENSIV_BGT60TRXX_CONF_IMPL
 #include "presence_radar_settings.h"
@@ -36,7 +52,7 @@
 #define PIN_RADAR_SPI_MISO  Radar_SPI_MISO
 #define PIN_RADAR_RST       Radar_RST
 
-#define XENSIV_BGT60TRXX_SPI_FREQUENCY      (24000000UL)
+#define XENSIV_BGT60TRXX_SPI_FREQUENCY      (12000000UL)
 
 #define NUM_SAMPLES_PER_FRAME               (XENSIV_BGT60TRXX_CONF_NUM_RX_ANTENNAS *\
                                              XENSIV_BGT60TRXX_CONF_NUM_CHIRPS_PER_FRAME *\
@@ -44,6 +60,137 @@
 
 #define LED1 P10_3
 #define LED2 P10_2
+
+/*******************************************************************************
+* Presence Detection Constants & Configuration
+********************************************************************************/
+/* Speed of light in m/s */
+#define RADAR_C                     299792458.0f
+
+/* Radar frequency parameters */
+#define RADAR_BANDWIDTH             (XENSIV_BGT60TRXX_CONF_END_FREQ_HZ - XENSIV_BGT60TRXX_CONF_START_FREQ_HZ)
+
+/* Derived constants */
+#define PRESENCE_RANGE_RESOLUTION   (RADAR_C / (2.0f * (float32_t)RADAR_BANDWIDTH))
+#define PRESENCE_NUM_SAMPLES        XENSIV_BGT60TRXX_CONF_NUM_SAMPLES_PER_CHIRP  /* 128 */
+#define PRESENCE_NUM_CHIRPS         XENSIV_BGT60TRXX_CONF_NUM_CHIRPS_PER_FRAME   /* 32 */
+#define PRESENCE_MACRO_FFT_SIZE     (PRESENCE_NUM_SAMPLES / 2)  /* 64 range bins */
+
+/* Presence algorithm configuration */
+#define PRESENCE_MIN_RANGE_BIN              2       /* Increased to 2 to avoid near-field noise (0.33m) */
+#define PRESENCE_MAX_RANGE_BIN              24      /* ~8m range (24 * 0.326m = 7.8m) */
+#define PRESENCE_MAX_RANGE_LIMIT_M          8.0f
+#define PRESENCE_MACRO_THRESHOLD            2.0f    /* Macro movement threshold (increased for stability) */
+#define PRESENCE_MICRO_THRESHOLD            40.0f   /* Micro movement threshold (increased from 25.0f) */
+#define PRESENCE_MACRO_COMPARE_INTERVAL_MS  250     /* Compare interval for macro */
+#define PRESENCE_MACRO_VALIDITY_MS          1000    /* Macro detection validity */
+#define PRESENCE_MICRO_VALIDITY_MS          2000    /* Micro detection validity (reduced from 4000ms) */
+#define PRESENCE_MACRO_CONFIRMATIONS        0       /* Required consecutive hits */
+#define PRESENCE_MICRO_FFT_SIZE             128     /* Doppler FFT size */
+#define PRESENCE_MICRO_COMPARE_IDX          5       /* Doppler bins to sum */
+#define PRESENCE_BANDPASS_ENABLED           true    /* Enable bandpass filter */
+#define PRESENCE_BANDPASS_NUMTAPS           65      /* FIR filter taps */
+#define PRESENCE_BANDPASS_DELAY_MS          490     /* Bandpass stabilization delay */
+
+/*******************************************************************************
+* Presence Detection Types
+********************************************************************************/
+/* Complex float type */
+typedef _Complex float cfloat32_t;
+
+/* Presence detection state */
+typedef enum {
+    PRESENCE_STATE_ABSENCE,
+    PRESENCE_STATE_MACRO_PRESENCE,
+    PRESENCE_STATE_MICRO_PRESENCE
+} presence_state_t;
+
+/* Presence detection result */
+typedef struct {
+    presence_state_t state;
+    int32_t range_bin;
+    float32_t range_m;
+    float32_t max_macro_value;
+    float32_t max_micro_value;
+} presence_result_t;
+
+/* Presence detection context for one radar */
+typedef struct {
+    /* FFT instances */
+    arm_rfft_fast_instance_f32 rfft_instance;
+    arm_cfft_instance_f32 doppler_fft_instance;
+    
+    /* Windowing */
+    float32_t hamming_window[PRESENCE_NUM_SAMPLES];
+    float32_t range_intensity_window[PRESENCE_MACRO_FFT_SIZE];
+    
+    /* Macro FFT buffers */
+    cfloat32_t macro_fft_buffer[PRESENCE_MACRO_FFT_SIZE];
+    cfloat32_t last_macro_compare[PRESENCE_MACRO_FFT_SIZE];
+    cfloat32_t bandpass_macro_fft_buffer[PRESENCE_MACRO_FFT_SIZE];
+    
+    /* Bandpass FIR filter instances and states for each range bin */
+    arm_fir_instance_f32 bandpass_fir_re[PRESENCE_MAX_RANGE_BIN + 1];
+    arm_fir_instance_f32 bandpass_fir_im[PRESENCE_MAX_RANGE_BIN + 1];
+    float32_t bandpass_state_re[(PRESENCE_MAX_RANGE_BIN + 1) * (PRESENCE_BANDPASS_NUMTAPS + 1)];
+    float32_t bandpass_state_im[(PRESENCE_MAX_RANGE_BIN + 1) * (PRESENCE_BANDPASS_NUMTAPS + 1)];
+    
+    /* Micro FFT buffer: [micro_fft_size][max_range_bin+1] */
+    cfloat32_t micro_fft_buffer[PRESENCE_MICRO_FFT_SIZE * (PRESENCE_MAX_RANGE_BIN + 1)];
+    cfloat32_t micro_fft_col_buffer[PRESENCE_MICRO_FFT_SIZE];
+    int32_t micro_fft_write_row_idx;
+    int32_t micro_fft_calc_col_idx;
+    bool micro_fft_ready;
+    bool micro_fft_all_calculated;
+    
+    /* Detection timestamps */
+    uint32_t macro_detect_timestamps[PRESENCE_MACRO_FFT_SIZE];
+    uint32_t micro_detect_timestamps[PRESENCE_MACRO_FFT_SIZE];
+    
+    /* State tracking */
+    presence_state_t state;
+    uint32_t last_macro_compare_ms;
+    uint32_t bandpass_initial_time_ms;
+    int32_t macro_movement_hit_count;
+    int32_t last_macro_reported_idx;
+    int32_t last_micro_reported_idx;
+    int32_t last_reported_idx;
+    bool macro_last_compare_init;
+    
+    /* Max values for debugging */
+    float32_t max_macro;
+    int32_t max_macro_idx;
+    float32_t max_micro;
+    int32_t max_micro_idx;
+    
+    /* Working buffer for frame processing */
+    float32_t frame_buffer[PRESENCE_NUM_SAMPLES];
+    float32_t fft_output[PRESENCE_NUM_SAMPLES * 2];  /* For complex FFT output */
+} presence_context_t;
+
+/*******************************************************************************
+* Bandpass Filter Coefficients (10-35Hz)
+* Generated using MATLAB: fir1(64, [10/100 35/100], 'DC-1')
+********************************************************************************/
+static const float32_t bandpass_coeffs[PRESENCE_BANDPASS_NUMTAPS] = {
+    -0.000672018944688787f, 5.40997750800323e-05f, -0.00170551007050673f, 0.000706931294401583f,
+    0.000529718080087782f,  0.00403359866465874f,  0.00102443397277923f, 0.00234848093688213f,
+    -0.00194992073010673f,  0.00451365295988384f,  0.00312574092180467f, 0.00888191214923986f,
+    -0.00340548841703134f, -0.00434494380465395f, -0.0153910491204704f, -0.00133041100723547f,
+    -0.00517641595111685f,  0.00200054539528286f, -0.0241426155178683f, -0.0230852875573157f,
+    -0.0293254372480552f,   0.0105956968865953f,   0.0175013648649183f,  0.0306608940135099f,
+    -0.00856346834860387f,  0.00160778144085906f,  0.0222545709144638f,  0.112213549580022f,
+    0.136465963717548f,     0.110216333677660f,   -0.0448122804532963f, -0.174898778170997f,
+    0.740136712192538f,    -0.174898778170997f,   -0.0448122804532963f,  0.110216333677660f,
+    0.136465963717548f,     0.112213549580022f,    0.0222545709144638f,  0.00160778144085906f,
+    -0.00856346834860387f,  0.0306608940135099f,   0.0175013648649183f,  0.0105956968865953f,
+    -0.0293254372480552f,  -0.0230852875573157f,  -0.0241426155178683f,  0.00200054539528286f,
+    -0.00517641595111685f, -0.00133041100723547f, -0.0153910491204704f, -0.00434494380465395f,
+    -0.00340548841703134f,  0.00888191214923986f,  0.00312574092180467f,  0.00451365295988384f,
+    -0.00194992073010673f,  0.00234848093688213f,  0.00102443397277923f,  0.00403359866465874f,
+    0.000529718080087782f,  0.000706931294401583f, -0.00170551007050673f, 5.40997750800323e-05f,
+    -0.000672018944688787f
+};
 
 /*******************************************************************************
 * Global variables
@@ -54,27 +201,63 @@ static cyhal_spi_t cyhal_spi;
 static xensiv_bgt60trxx_mtb_t sensor1;
 static xensiv_bgt60trxx_mtb_t sensor2;
 
-// Presence Detectors
-static presence_detector_t detector1;
-static presence_detector_t detector2;
+/* FreeRTOS Synchronization Objects */
+static SemaphoreHandle_t xRadar1Sem;
+static SemaphoreHandle_t xRadar2Sem;
+static SemaphoreHandle_t xSpiMutex;
+static SemaphoreHandle_t xStatusMutex;
 
-static volatile bool data_available_1 = false;
-static volatile bool data_available_2 = false;
+/* Shared Status */
+typedef struct {
+    presence_state_t state;
+    float32_t range;
+} radar_status_t;
 
-static bool sequence_running = true;
+static radar_status_t status_r1;
+static radar_status_t status_r2;
 
-/* Allocate enough memory for the radar dara frame. */
+// static bool sequence_running = true;
+
+/* Allocate enough memory for the radar data frame */
 static uint16_t samples[NUM_SAMPLES_PER_FRAME];
 
-// Averaged chirp buffer for processing
-static float32_t averaged_chirp[XENSIV_BGT60TRXX_CONF_NUM_SAMPLES_PER_CHIRP];
+/* Float frame buffer for presence detection (normalized samples) */
+static float32_t frame[NUM_SAMPLES_PER_FRAME];
+
+/* Averaged chirp buffer for presence algorithm */
+static float32_t avg_chirp[PRESENCE_NUM_SAMPLES];
+
+/* Presence detection contexts for both radars */
+static presence_context_t presence_ctx_1;
+static presence_context_t presence_ctx_2;
+
+/* System time counter (milliseconds) */
+// static uint32_t system_time_ms = 0; // Replaced by FreeRTOS tick count
 
 /*******************************************************************************
 * Function Prototypes
 ********************************************************************************/
 static void status_printf(const char *fmt, ...);
 static void usb_add_cdc(void);
-static void run_radar_sequence(xensiv_bgt60trxx_mtb_t *sensor_obj, volatile bool *data_flag, presence_detector_t* detector, uint32_t time_ms, const char *name);
+
+/* Task Prototypes */
+void SystemTask(void *pvParameters);
+void RadarTask(void *pvParameters);
+void PrintTask(void *pvParameters);
+
+/* Presence detection functions */
+static void presence_init(presence_context_t *ctx);
+static void presence_reset(presence_context_t *ctx);
+static presence_result_t presence_process_frame(presence_context_t *ctx, 
+                                                 float32_t *frame_data, 
+                                                 uint32_t time_ms);
+
+/* Radar processing */
+static void run_presence_detection(xensiv_bgt60trxx_mtb_t *sensor_obj, 
+                                   SemaphoreHandle_t sem, 
+                                   presence_context_t *ctx,
+                                   radar_status_t *status,
+                                   uint32_t time_ms);
 static cy_rslt_t init_dual_radars(void);
 
 #if defined(CYHAL_API_VERSION) && (CYHAL_API_VERSION >= 2)
@@ -105,7 +288,11 @@ void radar1_irq_handler(void *args, cyhal_gpio_irq_event_t event)
 {
     CY_UNUSED_PARAMETER(args);
     CY_UNUSED_PARAMETER(event);
-    data_available_1 = true;
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    if (xRadar1Sem != NULL) {
+        xSemaphoreGiveFromISR(xRadar1Sem, &xHigherPriorityTaskWoken);
+    }
+    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
 
 #if defined(CYHAL_API_VERSION) && (CYHAL_API_VERSION >= 2)
@@ -116,8 +303,398 @@ void radar2_irq_handler(void *args, cyhal_gpio_irq_event_t event)
 {
     CY_UNUSED_PARAMETER(args);
     CY_UNUSED_PARAMETER(event);
-    data_available_2 = true;
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    if (xRadar2Sem != NULL) {
+        xSemaphoreGiveFromISR(xRadar2Sem, &xHigherPriorityTaskWoken);
+    }
+    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
+
+/*******************************************************************************
+* Presence Detection Implementation
+********************************************************************************/
+
+/**
+ * @brief Generate Hamming window
+ */
+static void generate_hamming_window(float32_t *win, uint32_t len)
+{
+    for (uint32_t i = 0; i < len; i++) {
+        win[i] = 0.54f - 0.46f * arm_cos_f32(2.0f * PI * (float32_t)i / (float32_t)(len - 1));
+    }
+}
+
+/**
+ * @brief Initialize presence detection context
+ */
+static void presence_init(presence_context_t *ctx)
+{
+    /* Initialize FFT instances */
+    arm_rfft_fast_init_f32(&ctx->rfft_instance, PRESENCE_NUM_SAMPLES);
+    arm_cfft_init_f32(&ctx->doppler_fft_instance, PRESENCE_MICRO_FFT_SIZE);
+    
+    /* Generate Hamming window */
+    generate_hamming_window(ctx->hamming_window, PRESENCE_NUM_SAMPLES);
+    
+    /* Generate range intensity window: 0.2 * (i + 1) */
+    for (int32_t i = 0; i < PRESENCE_MACRO_FFT_SIZE; i++) {
+        ctx->range_intensity_window[i] = 0.2f * ((float32_t)i + 1.0f);
+    }
+    
+    /* Initialize bandpass FIR filters for each range bin */
+    for (int32_t i = 0; i <= PRESENCE_MAX_RANGE_BIN; i++) {
+        int32_t state_offset = i * (PRESENCE_BANDPASS_NUMTAPS + 1);
+        
+        arm_fir_init_f32(&ctx->bandpass_fir_re[i],
+                         PRESENCE_BANDPASS_NUMTAPS,
+                         (float32_t*)bandpass_coeffs,
+                         &ctx->bandpass_state_re[state_offset],
+                         1);  /* Block size = 1 */
+        
+        arm_fir_init_f32(&ctx->bandpass_fir_im[i],
+                         PRESENCE_BANDPASS_NUMTAPS,
+                         (float32_t*)bandpass_coeffs,
+                         &ctx->bandpass_state_im[state_offset],
+                         1);  /* Block size = 1 */
+    }
+    
+    /* Reset state */
+    presence_reset(ctx);
+}
+
+/**
+ * @brief Reset presence detection state
+ */
+static void presence_reset(presence_context_t *ctx)
+{
+    /* Clear buffers */
+    memset(ctx->macro_fft_buffer, 0, sizeof(ctx->macro_fft_buffer));
+    memset(ctx->last_macro_compare, 0, sizeof(ctx->last_macro_compare));
+    memset(ctx->bandpass_macro_fft_buffer, 0, sizeof(ctx->bandpass_macro_fft_buffer));
+    memset(ctx->micro_fft_buffer, 0, sizeof(ctx->micro_fft_buffer));
+    memset(ctx->macro_detect_timestamps, 0, sizeof(ctx->macro_detect_timestamps));
+    memset(ctx->micro_detect_timestamps, 0, sizeof(ctx->micro_detect_timestamps));
+    
+    /* Reset state variables */
+    ctx->state = PRESENCE_STATE_ABSENCE;
+    ctx->micro_fft_write_row_idx = 0;
+    ctx->micro_fft_calc_col_idx = PRESENCE_MIN_RANGE_BIN;
+    ctx->micro_fft_ready = false;
+    ctx->micro_fft_all_calculated = false;
+    ctx->last_macro_compare_ms = 0;
+    ctx->bandpass_initial_time_ms = 0;
+    ctx->macro_movement_hit_count = 0;
+    ctx->last_macro_reported_idx = -1;
+    ctx->last_micro_reported_idx = -1;
+    ctx->last_reported_idx = -1;
+    ctx->macro_last_compare_init = false;
+    ctx->max_macro = 0.0f;
+    ctx->max_macro_idx = -1;
+    ctx->max_micro = 0.0f;
+    ctx->max_micro_idx = -1;
+    
+    /* Reinitialize bandpass FIR states */
+    memset(ctx->bandpass_state_re, 0, sizeof(ctx->bandpass_state_re));
+    memset(ctx->bandpass_state_im, 0, sizeof(ctx->bandpass_state_im));
+    
+    for (int32_t i = 0; i <= PRESENCE_MAX_RANGE_BIN; i++) {
+        int32_t state_offset = i * (PRESENCE_BANDPASS_NUMTAPS + 1);
+        
+        arm_fir_init_f32(&ctx->bandpass_fir_re[i],
+                         PRESENCE_BANDPASS_NUMTAPS,
+                         (float32_t*)bandpass_coeffs,
+                         &ctx->bandpass_state_re[state_offset],
+                         1);
+        
+        arm_fir_init_f32(&ctx->bandpass_fir_im[i],
+                         PRESENCE_BANDPASS_NUMTAPS,
+                         (float32_t*)bandpass_coeffs,
+                         &ctx->bandpass_state_im[state_offset],
+                         1);
+    }
+}
+
+/**
+ * @brief Process one frame for presence detection
+ * @param ctx Presence context
+ * @param frame_data Averaged chirp data (NUM_SAMPLES floats)
+ * @param time_ms Current timestamp in milliseconds
+ * @return Presence detection result
+ */
+static presence_result_t presence_process_frame(presence_context_t *ctx, 
+                                                 float32_t *frame_data, 
+                                                 uint32_t time_ms)
+{
+    presence_result_t result = {
+        .state = ctx->state,
+        .range_bin = ctx->last_reported_idx >= 0 ? ctx->last_reported_idx : 0,
+        .range_m = ctx->last_reported_idx >= 0 ? ctx->last_reported_idx * PRESENCE_RANGE_RESOLUTION : 0.0f,
+        .max_macro_value = ctx->max_macro,
+        .max_micro_value = ctx->max_micro
+    };
+    
+    /* Initialize bandpass delay time on first call */
+    if (ctx->bandpass_initial_time_ms == 0) {
+        ctx->bandpass_initial_time_ms = time_ms + PRESENCE_BANDPASS_DELAY_MS;
+    }
+    
+    /* ----------------------------------------------------------------
+     * Step 1: Apply window and compute Range FFT
+     * ---------------------------------------------------------------- */
+    
+    /* Copy and apply Hamming window */
+    for (int32_t i = 0; i < PRESENCE_NUM_SAMPLES; i++) {
+        ctx->frame_buffer[i] = frame_data[i] * ctx->hamming_window[i];
+    }
+    
+    /* Compute real FFT */
+    arm_rfft_fast_f32(&ctx->rfft_instance, ctx->frame_buffer, ctx->fft_output, 0);
+    
+    /* Convert to complex format: rfft output is [DC, re1, im1, re2, im2, ...] */
+    /* Store in macro_fft_buffer as complex numbers */
+    ctx->macro_fft_buffer[0] = ctx->fft_output[0] + I * 0.0f;  /* DC component */
+    for (int32_t i = 1; i < PRESENCE_MACRO_FFT_SIZE; i++) {
+        float32_t re = ctx->fft_output[2 * i];
+        float32_t im = ctx->fft_output[2 * i + 1];
+        ctx->macro_fft_buffer[i] = re + I * im;
+    }
+    
+    /* ----------------------------------------------------------------
+     * Step 2: Apply Bandpass Filter (optional)
+     * ---------------------------------------------------------------- */
+    cfloat32_t *active_fft_buffer = ctx->macro_fft_buffer;
+    
+    if (PRESENCE_BANDPASS_ENABLED) {
+        for (int32_t i = 0; i <= PRESENCE_MAX_RANGE_BIN; i++) {
+            float32_t in_re = crealf(ctx->macro_fft_buffer[i]);
+            float32_t in_im = cimagf(ctx->macro_fft_buffer[i]);
+            float32_t out_re, out_im;
+            
+            arm_fir_f32(&ctx->bandpass_fir_re[i], &in_re, &out_re, 1);
+            arm_fir_f32(&ctx->bandpass_fir_im[i], &in_im, &out_im, 1);
+            
+            ctx->bandpass_macro_fft_buffer[i] = out_re + I * out_im;
+        }
+        active_fft_buffer = ctx->bandpass_macro_fft_buffer;
+    }
+    
+    /* Initialize last macro compare on first frame */
+    if (!ctx->macro_last_compare_init) {
+        memcpy(ctx->last_macro_compare, active_fft_buffer, 
+               PRESENCE_MACRO_FFT_SIZE * sizeof(cfloat32_t));
+        ctx->macro_last_compare_init = true;
+    }
+    
+    /* ----------------------------------------------------------------
+     * Step 3: Macro Movement Detection
+     * ---------------------------------------------------------------- */
+    bool hit = false;
+    
+    if ((ctx->last_macro_compare_ms + PRESENCE_MACRO_COMPARE_INTERVAL_MS < time_ms) &&
+        (time_ms > ctx->bandpass_initial_time_ms)) {
+        
+        /* Only process if within reasonable time window */
+        if (ctx->last_macro_compare_ms + 2 * PRESENCE_MACRO_COMPARE_INTERVAL_MS > time_ms) {
+            
+            for (int32_t i = PRESENCE_MIN_RANGE_BIN; i <= PRESENCE_MAX_RANGE_BIN; i++) {
+                /* Calculate difference between current and previous FFT */
+                cfloat32_t diff = active_fft_buffer[i] - ctx->last_macro_compare[i];
+                
+                /* Apply range intensity scaling */
+                float32_t macro_val = cabsf(diff) * ctx->range_intensity_window[i];
+                
+                /* Apply bandpass scaling correction */
+                if (PRESENCE_BANDPASS_ENABLED) {
+                    macro_val = macro_val * (0.5f / 0.45f);
+                }
+                
+                /* Track maximum */
+                if (macro_val >= ctx->max_macro) {
+                    ctx->max_macro = macro_val;
+                    ctx->max_macro_idx = i;
+                }
+                
+                /* Check threshold */
+                if (macro_val >= PRESENCE_MACRO_THRESHOLD) {
+                    hit = true;
+                    ctx->macro_detect_timestamps[i] = time_ms + PRESENCE_MACRO_VALIDITY_MS;
+                }
+            }
+        }
+        
+        /* Update hit counter */
+        if (hit) {
+            ctx->macro_movement_hit_count++;
+        } else {
+            ctx->macro_movement_hit_count = 0;
+        }
+        
+        /* Update last compare buffer */
+        memcpy(ctx->last_macro_compare, active_fft_buffer, 
+               PRESENCE_MACRO_FFT_SIZE * sizeof(cfloat32_t));
+        ctx->last_macro_compare_ms = time_ms;
+        
+        /* Determine macro movement index */
+        int32_t macro_movement_idx = -1;
+        if (ctx->macro_movement_hit_count >= PRESENCE_MACRO_CONFIRMATIONS) {
+            /* Find first valid range bin */
+            for (int32_t i = PRESENCE_MIN_RANGE_BIN; i <= PRESENCE_MAX_RANGE_BIN; i++) {
+                if (time_ms <= ctx->macro_detect_timestamps[i]) {
+                    macro_movement_idx = i;
+                    break;
+                }
+            }
+        }
+        
+        /* State transition based on macro detection */
+        if (macro_movement_idx != ctx->last_macro_reported_idx) {
+            if (macro_movement_idx >= 0) {
+                /* Macro presence detected */
+                ctx->state = PRESENCE_STATE_MACRO_PRESENCE;
+                ctx->last_reported_idx = macro_movement_idx;
+                
+                result.state = PRESENCE_STATE_MACRO_PRESENCE;
+                result.range_bin = macro_movement_idx;
+                result.range_m = macro_movement_idx * PRESENCE_RANGE_RESOLUTION;
+            } else {
+                /* Macro not detected, check micro */
+                ctx->state = PRESENCE_STATE_MICRO_PRESENCE;
+                ctx->last_micro_reported_idx = -1;
+                
+                /* Initialize micro timestamps */
+                for (int32_t i = PRESENCE_MIN_RANGE_BIN; i <= PRESENCE_MAX_RANGE_BIN; i++) {
+                    if (i >= ctx->last_macro_reported_idx) {
+                        ctx->micro_detect_timestamps[i] = time_ms + PRESENCE_MICRO_VALIDITY_MS;
+                    } else {
+                        ctx->micro_detect_timestamps[i] = 0;
+                    }
+                }
+                ctx->micro_fft_calc_col_idx = PRESENCE_MIN_RANGE_BIN;
+            }
+            ctx->last_macro_reported_idx = macro_movement_idx;
+        }
+    }
+    
+    /* ----------------------------------------------------------------
+     * Step 4: Store data for Micro FFT
+     * ---------------------------------------------------------------- */
+    /* Store current FFT result in micro buffer */
+    int32_t micro_buffer_offset = ctx->micro_fft_write_row_idx * (PRESENCE_MAX_RANGE_BIN + 1);
+    for (int32_t i = 0; i <= PRESENCE_MAX_RANGE_BIN; i++) {
+        ctx->micro_fft_buffer[micro_buffer_offset + i] = ctx->macro_fft_buffer[i];
+    }
+    ctx->micro_fft_write_row_idx++;
+    
+    /* Check if micro buffer is full */
+    if (ctx->micro_fft_write_row_idx >= PRESENCE_MICRO_FFT_SIZE) {
+        ctx->micro_fft_ready = true;
+        ctx->micro_fft_write_row_idx = 0;
+        ctx->micro_fft_calc_col_idx = PRESENCE_MIN_RANGE_BIN;
+    }
+    
+    /* Skip micro processing if in macro-only states */
+    if (ctx->state == PRESENCE_STATE_ABSENCE || 
+        ctx->state == PRESENCE_STATE_MACRO_PRESENCE) {
+        result.state = ctx->state;
+        result.max_macro_value = ctx->max_macro;
+        return result;
+    }
+    
+    /* ----------------------------------------------------------------
+     * Step 5: Micro Movement Detection (Doppler FFT)
+     * ---------------------------------------------------------------- */
+    if (ctx->micro_fft_ready) {
+        /* Extract column for current range bin */
+        cfloat32_t mean = 0.0f + I * 0.0f;
+        
+        for (int32_t row = 0; row < PRESENCE_MICRO_FFT_SIZE; row++) {
+            int32_t actual_row = (row + ctx->micro_fft_write_row_idx) % PRESENCE_MICRO_FFT_SIZE;
+            int32_t idx = actual_row * (PRESENCE_MAX_RANGE_BIN + 1) + ctx->micro_fft_calc_col_idx;
+            ctx->micro_fft_col_buffer[row] = ctx->micro_fft_buffer[idx];
+            mean += ctx->micro_fft_buffer[idx];
+        }
+        
+        /* Mean removal */
+        float32_t mean_re = crealf(mean) / (float32_t)PRESENCE_MICRO_FFT_SIZE;
+        float32_t mean_im = cimagf(mean) / (float32_t)PRESENCE_MICRO_FFT_SIZE;
+        mean = mean_re + I * mean_im;
+        
+        for (int32_t i = 0; i < PRESENCE_MICRO_FFT_SIZE; i++) {
+            ctx->micro_fft_col_buffer[i] -= mean;
+        }
+        
+        /* Perform Doppler FFT */
+        arm_cfft_f32(&ctx->doppler_fft_instance, (float32_t*)ctx->micro_fft_col_buffer, 0, 1);
+        
+        /* Calculate speed score (sum of magnitudes of low Doppler bins) */
+        float32_t speed = 0.0f;
+        for (int32_t i = 1; i <= PRESENCE_MICRO_COMPARE_IDX; i++) {
+            speed += cabsf(ctx->micro_fft_col_buffer[i]);
+        }
+        
+        /* Track maximum */
+        if (speed > ctx->max_micro) {
+            ctx->max_micro = speed;
+            ctx->max_micro_idx = ctx->micro_fft_calc_col_idx;
+        }
+        
+        /* Check threshold */
+        if (speed >= PRESENCE_MICRO_THRESHOLD) {
+            ctx->micro_detect_timestamps[ctx->micro_fft_calc_col_idx] = 
+                time_ms + PRESENCE_MICRO_VALIDITY_MS;
+            ctx->state = PRESENCE_STATE_MICRO_PRESENCE;
+        }
+        
+        /* Move to next column */
+        ctx->micro_fft_calc_col_idx++;
+        if (ctx->micro_fft_calc_col_idx > PRESENCE_MAX_RANGE_BIN) {
+            ctx->micro_fft_calc_col_idx = PRESENCE_MIN_RANGE_BIN;
+            ctx->micro_fft_all_calculated = true;
+        }
+    }
+    
+    /* Determine micro movement state */
+    int32_t micro_movement_idx = -1;
+    for (int32_t i = PRESENCE_MIN_RANGE_BIN; i <= PRESENCE_MAX_RANGE_BIN; i++) {
+        if (time_ms <= ctx->micro_detect_timestamps[i]) {
+            micro_movement_idx = i;
+            break;
+        }
+    }
+    
+    /* Report micro movement */
+    if (micro_movement_idx != ctx->last_micro_reported_idx) {
+        ctx->last_micro_reported_idx = micro_movement_idx;
+        if (micro_movement_idx >= 0) {
+            ctx->last_reported_idx = micro_movement_idx;
+            result.state = PRESENCE_STATE_MICRO_PRESENCE;
+            result.range_bin = micro_movement_idx;
+            result.range_m = micro_movement_idx * PRESENCE_RANGE_RESOLUTION;
+        }
+    }
+    
+    /* Check for absence */
+    if (micro_movement_idx == -1 && 
+        ctx->state == PRESENCE_STATE_MICRO_PRESENCE &&
+        ctx->micro_fft_all_calculated) {
+        ctx->state = PRESENCE_STATE_ABSENCE;
+        ctx->last_micro_reported_idx = -1;
+        ctx->micro_fft_all_calculated = false;
+        
+        result.state = PRESENCE_STATE_ABSENCE;
+        result.range_bin = 0;
+        result.range_m = 0.0f;
+    }
+    
+    result.max_macro_value = ctx->max_macro;
+    result.max_micro_value = ctx->max_micro;
+    
+    return result;
+}
+
+/*******************************************************************************
+* Radar Initialization and Processing
+********************************************************************************/
 
 static cy_rslt_t init_dual_radars(void) {
     cy_rslt_t rslt;
@@ -206,101 +783,120 @@ static cy_rslt_t init_dual_radars(void) {
     cyhal_gpio_write(PIN_RADAR1_CS, 1);
     cyhal_gpio_write(PIN_RADAR2_CS, 1);
 
-    // Initialize Presence Detectors
-    presence_init(&detector1);
-    presence_init(&detector2);
-
     return rslt;
 }
 
-static void run_radar_sequence(xensiv_bgt60trxx_mtb_t *sensor_obj, volatile bool *data_flag, presence_detector_t* detector, uint32_t time_ms, const char *name) {
-    /* Clear the data flag */
-    *data_flag = false;
+/**
+ * @brief Get state name string
+ */
+// static const char* get_presence_state_name(presence_state_t state)
+// {
+//     switch (state) {
+//         case PRESENCE_STATE_ABSENCE: return "ABSENCE";
+//         case PRESENCE_STATE_MACRO_PRESENCE: return "MACRO";
+//         case PRESENCE_STATE_MICRO_PRESENCE: return "MICRO";
+//         default: return "UNKNOWN";
+//     }
+// }
 
+/**
+ * @brief Run presence detection on one radar
+ */
+static void run_presence_detection(xensiv_bgt60trxx_mtb_t *sensor_obj, 
+                                   SemaphoreHandle_t sem, 
+                                   presence_context_t *ctx,
+                                   radar_status_t *status,
+                                   uint32_t time_ms) 
+{
     /* Start frame acquisition */
     int32_t res = xensiv_bgt60trxx_start_frame(&sensor_obj->dev, true);
     if (res != XENSIV_BGT60TRXX_STATUS_OK) {
-        // status_printf("%s: ERROR starting frame: %ld\r\n", name, (long)res);
+        status_printf("Start frame failed: %ld\r\n", (long)res);
         return;
     }
     
     /* Wait for interrupt with timeout */
-    uint32_t timeout = 50; // Reduced timeout for continuous loop
-    while (!(*data_flag) && timeout > 0) { 
-        cyhal_system_delay_ms(1);
-        timeout--;
-    }
-    
-    if (!(*data_flag)) {
-        // status_printf("%s: TIMEOUT - No data received\r\n", name);
+    if (xSemaphoreTake(sem, pdMS_TO_TICKS(3000)) != pdTRUE) {
+        /* Timeout */
+        status_printf("Timeout waiting for interrupt\r\n");
         xensiv_bgt60trxx_start_frame(&sensor_obj->dev, false);
+        
+        /* Update status to indicate failure/absence */
+        xSemaphoreTake(xStatusMutex, portMAX_DELAY);
+        status->state = PRESENCE_STATE_ABSENCE; // Default to absence on error
+        status->range = 0.0f;
+        xSemaphoreGive(xStatusMutex);
         return;
     }
     
-    /* Data received, stop frame (not strictly necessary for soft trigger but good practice) */
+    /* Read FIFO data */
+    int32_t read_res = xensiv_bgt60trxx_get_fifo_data(&sensor_obj->dev, samples, NUM_SAMPLES_PER_FRAME);
+    
+    /* Stop frame acquisition */
     xensiv_bgt60trxx_start_frame(&sensor_obj->dev, false);
-    
-    if (xensiv_bgt60trxx_get_fifo_data(&sensor_obj->dev, samples, NUM_SAMPLES_PER_FRAME) != XENSIV_BGT60TRXX_STATUS_OK) {
-        // status_printf("Error reading FIFO from %s\r\n", name);
+
+    if (read_res != XENSIV_BGT60TRXX_STATUS_OK) {
+        status_printf("FIFO read failed: %ld\r\n", (long)read_res);
+        
+        /* Update status to indicate failure/absence */
+        xSemaphoreTake(xStatusMutex, portMAX_DELAY);
+        status->state = PRESENCE_STATE_ABSENCE; // Default to absence on error
+        status->range = 0.0f;
+        xSemaphoreGive(xStatusMutex);
         return;
     }
-
-    // Process Data
-    // Average Chirps: The settings have 32 chirps per frame.
-    // XENSIV_BGT60TRXX_CONF_NUM_CHIRPS_PER_FRAME = 32
-    // XENSIV_BGT60TRXX_CONF_NUM_SAMPLES_PER_CHIRP = 128
-    // XENSIV_BGT60TRXX_CONF_NUM_RX_ANTENNAS = 1
     
-    // Reset average buffer
-    memset(averaged_chirp, 0, sizeof(averaged_chirp));
-    
-    int num_chirps = XENSIV_BGT60TRXX_CONF_NUM_CHIRPS_PER_FRAME;
-    int samples_per_chirp = XENSIV_BGT60TRXX_CONF_NUM_SAMPLES_PER_CHIRP;
-    
-    float32_t overall_mean = 0.0f;
-
-    for (int s = 0; s < samples_per_chirp; s++) {
-        float32_t sum = 0.0f;
-        for (int c = 0; c < num_chirps; c++) {
-            // samples layout: [chirp0_s0, chirp0_s1... chirp1_s0...]
-            sum += (float32_t)samples[c * samples_per_chirp + s];
-        }
-        averaged_chirp[s] = sum / (float32_t)num_chirps;
-        overall_mean += averaged_chirp[s];
+    /* Data preprocessing - convert raw 12-bit ADC values to normalized floats
+     * CRITICAL: Must divide by 4096.0 to normalize values to [0, 1) range
+     * This matches the Infineon example exactly */
+    uint16_t *bgt60_buffer_ptr = samples;
+    float32_t *frame_ptr = &frame[0];
+    for (int32_t sample = 0; sample < NUM_SAMPLES_PER_FRAME; ++sample)
+    {
+        *frame_ptr++ = ((float32_t)(*bgt60_buffer_ptr++) / 4096.0F);
     }
     
-    overall_mean /= (float32_t)samples_per_chirp;
+    /* Calculate the average of the chirps using Infineon's exact method
+     * Data layout with NUM_RX_ANTENNAS=1 is [chirp0_samples][chirp1_samples]... */
+    arm_fill_f32(0, avg_chirp, PRESENCE_NUM_SAMPLES);
     
-    // Remove DC component (Mean Removal)
-    for (int s = 0; s < samples_per_chirp; s++) {
-        averaged_chirp[s] -= overall_mean;
+    for (int chirp = 0; chirp < PRESENCE_NUM_CHIRPS; chirp++)
+    {
+        arm_add_f32(avg_chirp, &frame[PRESENCE_NUM_SAMPLES * chirp], avg_chirp, PRESENCE_NUM_SAMPLES);
     }
     
-    // Run Presence Detection
-    presence_result_t result;
-    presence_process(detector, averaged_chirp, time_ms, &result);
+    arm_scale_f32(avg_chirp, 1.0f / PRESENCE_NUM_CHIRPS, avg_chirp, PRESENCE_NUM_SAMPLES);
     
-    // Note: We don't print here anymore.
+    /* Process frame for presence detection
+     * Note: Mean removal is done internally by the presence algorithm */
+    presence_result_t result = presence_process_frame(ctx, avg_chirp, time_ms);
+    
+    /* Update shared status */
+    xSemaphoreTake(xStatusMutex, portMAX_DELAY);
+    status->state = result.state;
+    status->range = result.range_m;
+    xSemaphoreGive(xStatusMutex);
+    
+    /* Reset max values after each frame */
+    ctx->max_macro = 0.0f;
+    ctx->max_macro_idx = -1;
+    ctx->max_micro = 0.0f;
+    ctx->max_micro_idx = -1;
 }
 
-int main(void)
-{
-    cy_rslt_t result = CY_RSLT_SUCCESS;
+/*******************************************************************************
+* Main Function
+********************************************************************************/
 
-    /* Initialize the device and board peripherals. */
-    result = cybsp_init();
-    CY_ASSERT(result == CY_RSLT_SUCCESS);
-
-    __enable_irq();
-
-    /* Initialize retarget-io to use the debug UART port. */
-    result = cy_retarget_io_init(P7_1, P7_0, CY_RETARGET_IO_BAUDRATE);
-    CY_ASSERT(result == CY_RSLT_SUCCESS);
+/* Task Definitions */
+void SystemTask(void *pvParameters) {
+    (void)pvParameters;
+    cy_rslt_t result;
 
     /* Initialize the User LED */
     cyhal_gpio_init(LED1, CYHAL_GPIO_DIR_OUTPUT, CYHAL_GPIO_DRIVE_STRONG, 0);
 
-    /* Initializes the USB stack */
+    /* Initialize the USB stack */
     USBD_Init();
     usb_add_cdc();
     USBD_SetDeviceInfo(&usb_deviceInfo);
@@ -310,7 +906,7 @@ int main(void)
     uint32_t timeout = 0;
     while ((USBD_GetState() & USB_STAT_CONFIGURED) != USB_STAT_CONFIGURED)
     {
-        cyhal_system_delay_ms(USB_CONFIG_DELAY);
+        vTaskDelay(pdMS_TO_TICKS(USB_CONFIG_DELAY));
         timeout++;
         if (timeout > 200)  /* 10 seconds timeout */
         {
@@ -319,12 +915,15 @@ int main(void)
     }
 
     status_printf("USB configured.\r\n");
-    cyhal_system_delay_ms(500);
+    vTaskDelay(pdMS_TO_TICKS(500));
 
     status_printf("Dual Radar Presence Detection\r\n");
+    status_printf("Range Resolution: %.3f m\r\n", PRESENCE_RANGE_RESOLUTION);
+    status_printf("Max Range Bin: %d (%.2f m)\r\n", PRESENCE_MAX_RANGE_BIN, 
+                  PRESENCE_MAX_RANGE_BIN * PRESENCE_RANGE_RESOLUTION);
 
-    status_printf("Debug: Initializing SPI...\r\n");
-    /* Initialize the SPI interface to BGT60. */
+    /* Initialize SPI */
+    status_printf("Initializing SPI...\r\n");
     result = cyhal_spi_init(&cyhal_spi,
                             PIN_RADAR_SPI_MOSI,
                             PIN_RADAR_SPI_MISO,
@@ -351,7 +950,6 @@ int main(void)
     Cy_GPIO_SetDriveSel(CYHAL_GET_PORTADDR(PIN_RADAR_SPI_SCLK),
                         CYHAL_GET_PIN(PIN_RADAR_SPI_SCLK), CY_GPIO_DRIVE_1_8);
 
-    status_printf("Debug: Setting SPI frequency...\r\n");
     result = cyhal_spi_set_frequency(&cyhal_spi, XENSIV_BGT60TRXX_SPI_FREQUENCY);
     if (result != CY_RSLT_SUCCESS)
     {
@@ -359,63 +957,129 @@ int main(void)
         for(;;) {}
     }
 
-    status_printf("Debug: Initializing Dual Radars...\r\n");
+    /* Initialize dual radars */
+    status_printf("Initializing Dual Radars...\r\n");
     result = init_dual_radars();
     if (result != CY_RSLT_SUCCESS)
     {
         status_printf("Radar initialization failed. Error: 0x%08lX\r\n", (unsigned long)result);
         for(;;) {}
     }
-    status_printf("Dual Radars Initialized.\r\n");
-    status_printf("Starting presence detection loop...\r\n");
-    cyhal_system_delay_ms(100);
+    
+    /* Initialize presence detection for both radars */
+    status_printf("Initializing Presence Detection...\r\n");
+    presence_init(&presence_ctx_1);
+    presence_init(&presence_ctx_2);
+    
+    status_printf("Dual Radars and Presence Detection Initialized.\r\n");
+    status_printf("Starting continuous presence detection...\r\n");
+    status_printf("Macro Threshold: %.2f, Micro Threshold: %.2f\r\n",
+                  PRESENCE_MACRO_THRESHOLD, PRESENCE_MICRO_THRESHOLD);
+    vTaskDelay(pdMS_TO_TICKS(100));
 
-    uint32_t current_time_ms = 0;
-    uint32_t last_print_time = 0;
-    const uint32_t FRAME_INTERVAL_MS = 50; // 20Hz
+    /* Create Tasks */
+    xTaskCreate(RadarTask, "Radar", 4096, NULL, 2, NULL);
+    xTaskCreate(PrintTask, "Print", 1024, NULL, 1, NULL);
+    
+    /* Delete self */
+    vTaskDelete(NULL);
+}
 
-    for(;;)
-    {
-        if (sequence_running) {
-            cyhal_gpio_write(LED1, 1);
-            
-            // Radar 1
-            run_radar_sequence(&sensor1, &data_available_1, &detector1, current_time_ms, "Radar 1");
-            
-            // Radar 2
-            run_radar_sequence(&sensor2, &data_available_2, &detector2, current_time_ms, "Radar 2");
-            
-            // Increment Time
-            current_time_ms += FRAME_INTERVAL_MS;
-            
-            // Check for Print Interval (3 seconds)
-            if (current_time_ms - last_print_time >= 3000) {
-                
-                const char* state1_str = (detector1.state == PRESENCE_STATE_ABSENCE) ? "ABSENCE" : 
-                                         (detector1.state == PRESENCE_STATE_MACRO_PRESENCE) ? "MACRO" : "MICRO";
-                
-                const char* state2_str = (detector2.state == PRESENCE_STATE_ABSENCE) ? "ABSENCE" : 
-                                         (detector2.state == PRESENCE_STATE_MACRO_PRESENCE) ? "MACRO" : "MICRO";
-                
-                status_printf("Time: %lu ms | R1: %s (%.2fm) | R2: %s (%.2fm)\r\n", 
-                              (unsigned long)current_time_ms, 
-                              state1_str, detector1.range_m, 
-                              state2_str, detector2.range_m);
-                
-                last_print_time = current_time_ms;
-            }
-            
-            cyhal_gpio_write(LED1, 0);
-            
-            // Optional: small delay to not hog CPU/Bus completely, though we want max speed to meet 50ms if possible.
-            // If the acquisition takes > 50ms, this loop runs slower than real time 20Hz.
-            cyhal_system_delay_ms(1); 
-            
+void RadarTask(void *pvParameters) {
+    (void)pvParameters;
+    
+    /* Frame period in ms (from config: ~50ms = 20Hz) */
+    uint32_t frame_period_ms = (uint32_t)(XENSIV_BGT60TRXX_CONF_FRAME_REPETITION_TIME_S * 1000.0f);
+    uint32_t system_time_ms = 0;
+
+    for(;;) {
+        /* Update system time based on frame period, not wall clock */
+        system_time_ms += frame_period_ms;
+        
+        xSemaphoreTake(xSpiMutex, portMAX_DELAY);
+        
+        /* Toggle LED to show activity */
+        cyhal_gpio_write(LED1, 1);
+        
+        // Radar 1
+        run_presence_detection(&sensor1, xRadar1Sem, &presence_ctx_1, &status_r1, system_time_ms);
+        
+        xSemaphoreGive(xSpiMutex);
+        
+        /* Small delay between radars */
+        vTaskDelay(pdMS_TO_TICKS(50));
+        
+        xSemaphoreTake(xSpiMutex, portMAX_DELAY);
+        
+        // Radar 2
+        run_presence_detection(&sensor2, xRadar2Sem, &presence_ctx_2, &status_r2, system_time_ms);
+        
+        cyhal_gpio_write(LED1, 0);
+        
+        xSemaphoreGive(xSpiMutex);
+        
+        vTaskDelay(pdMS_TO_TICKS(frame_period_ms));
+    }
+}
+
+void PrintTask(void *pvParameters) {
+    (void)pvParameters;
+    for(;;) {
+        vTaskDelay(pdMS_TO_TICKS(3000));
+        
+        xSemaphoreTake(xStatusMutex, portMAX_DELAY);
+        radar_status_t r1 = status_r1;
+        radar_status_t r2 = status_r2;
+        xSemaphoreGive(xStatusMutex);
+        
+        status_printf("--------------------------------------------------\r\n");
+        if (r1.state == PRESENCE_STATE_ABSENCE) {
+            status_printf("[R1] No human\r\n");
         } else {
-            cyhal_system_delay_ms(100);
+            status_printf("[R1] Human detect, Range: %.2f m\r\n", r1.range);
+        }
+        
+        if (r2.state == PRESENCE_STATE_ABSENCE) {
+            status_printf("[R2] No human\r\n");
+        } else {
+            status_printf("[R2] Human detect, Range: %.2f m\r\n", r2.range);
         }
     }
 }
+
+int main(void)
+{
+    cy_rslt_t result = CY_RSLT_SUCCESS;
+
+    /* Initialize the device and board peripherals */
+    result = cybsp_init();
+    CY_ASSERT(result == CY_RSLT_SUCCESS);
+
+    __enable_irq();
+
+    /* Initialize retarget-io to use the debug UART port */
+    result = cy_retarget_io_init(P7_1, P7_0, CY_RETARGET_IO_BAUDRATE);
+    CY_ASSERT(result == CY_RSLT_SUCCESS);
+
+    /* Create Synchronization Objects */
+    xRadar1Sem = xSemaphoreCreateBinary();
+    xRadar2Sem = xSemaphoreCreateBinary();
+    xSpiMutex = xSemaphoreCreateMutex();
+    xStatusMutex = xSemaphoreCreateMutex();
+    
+    /* Create System Init Task */
+    xTaskCreate(SystemTask, "System", 1024, NULL, 3, NULL);
+    
+    /* Start Scheduler */
+    status_printf("Starting FreeRTOS Scheduler...\r\n");
+    vTaskStartScheduler();
+    
+    for(;;) {}
+}
+
+/*******************************************************************************
+* USB CDC Functions
+********************************************************************************/
 
 static void status_printf(const char *fmt, ...)
 {
@@ -427,11 +1091,20 @@ static void status_printf(const char *fmt, ...)
     vsnprintf(buffer, sizeof(buffer), fmt, args);
     va_end(args);
     
+    /* Check if scheduler is running to use mutex */
+    if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING) {
+        // xSemaphoreTake(xStatusMutex, portMAX_DELAY); // Optional: Protect USB write if needed
+    }
+
     if ((USBD_GetState() & USB_STAT_CONFIGURED) == USB_STAT_CONFIGURED) {
         uint32_t len = strlen(buffer);
         /* Non-blocking write - if it fails, we just drop the message */
         USBD_CDC_Write(usb_cdcHandle, (uint8_t *)buffer, len, 0);
     }
+    
+    /* if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING) {
+        xSemaphoreGive(xStatusMutex);
+    } */
 }
 
 void usb_add_cdc(void) {
