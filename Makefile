@@ -94,7 +94,7 @@ DISABLE_COMPONENTS=
 # tree for source code and builds it. The SOURCES variable can be used to
 # manually add source code to the build process from a location not searched
 # by default, or otherwise not found by the build system.
-SOURCES=
+SOURCES=src/presence_detection.c src/usb_logging.c src/radar_task.c
 
 # Like SOURCES, but for include directories. Value should be paths to
 # directories (without a leading -I).
