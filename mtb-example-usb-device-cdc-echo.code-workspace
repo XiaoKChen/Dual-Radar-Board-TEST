@@ -18,18 +18,19 @@
         //mtb//      macOS  : $HOME/Library/Application Support/Code/User/settings.json
         //mtb//      Linux  : $HOME/.config/Code/User/settings.json
         //mtb//
-        "modustoolbox.toolsPath": "C:/Users/Xiaok/ModusToolbox/tools_3.6",
-        "cortex-debug.armToolchainPath": "C:/Users/Xiaok/Infineon/Tools/mtb-gcc-arm-eabi/14.2.1/gcc/bin",
-        "cortex-debug.openocdPath": "${config:modustoolbox.toolsPath}/../../../../Infineon/Tools/ModusToolboxProgtools-1.5/openocd/bin/openocd.exe",
-        "cortex-debug.JLinkGDBServerPath.windows": "C:/Program Files/SEGGER/JLink_V860/JLinkGDBServerCL.exe",
-        "cortex-debug.JLinkGDBServerPath.osx": "C:/Program Files/SEGGER/JLink_V860/JLinkGDBServerCL.exe",
-        "cortex-debug.JLinkGDBServerPath.linux": "C:/Program Files/SEGGER/JLink_V860/JLinkGDBServerCL.exe",
+        "modustoolbox.toolsPath": "C:/Users/chen1/ModusToolbox/tools_3.6",
+        "cortex-debug.armToolchainPath": "C:/Users/chen1/Infineon/Tools/mtb-gcc-arm-eabi/14.2.1/gcc/bin",
+        "cortex-debug.openocdPath": "${config:modustoolbox.toolsPath}/../../../../Infineon/Tools/ModusToolboxProgtools-1.6/openocd/bin/openocd.exe",
+        "cortex-debug.JLinkGDBServerPath.windows": "C:/Program Files/SEGGER/JLink_V852/JLinkGDBServerCL.exe",
+        "cortex-debug.JLinkGDBServerPath.osx": "C:/Program Files/SEGGER/JLink_V852/JLinkGDBServerCL.exe",
+        "cortex-debug.JLinkGDBServerPath.linux": "C:/Program Files/SEGGER/JLink_V852/JLinkGDBServerCL.exe",
         "clangd.arguments": [
             "--query-driver=${config:modustoolbox.toolsPath}/gcc/bin/arm-none-eabi-gcc",
             "--log=verbose",
             "--background-index",
             "--compile-commands-dir=${workspaceFolder}/build"
-        ]
+        ],
+        "workbench.colorTheme": "Userscape Contrast (rainglow)"
     },
     "extensions": {
         "recommendations": [ "marus25.cortex-debug", "ms-vscode.cpptools", "dan-c-underwood.arm" ]

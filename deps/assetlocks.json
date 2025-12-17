@@ -1,7 +1,15 @@
 [
     {
+        "asset-name": "abstraction-rtos",
+        "locked-commit": "release-v1.12.0"
+    },
+    {
         "asset-name": "cat1cm0p",
         "locked-commit": "release-v1.9.0"
+    },
+    {
+        "asset-name": "clib-support",
+        "locked-commit": "release-v1.8.0"
     },
     {
         "asset-name": "cmsis",

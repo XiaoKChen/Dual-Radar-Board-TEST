@@ -155,3 +155,6 @@ ehthumbs_vista.db
 # Build system cache and logs
 .cache
 .ninja_log
+
+# Other 
+Infineon-BGT60TR13C-Presence-Detection/
