@@ -35,15 +35,15 @@
 #define PRESENCE_MIN_RANGE_BIN              2       /* Increased to 2 to avoid near-field noise (0.33m) */
 #define PRESENCE_MAX_RANGE_BIN              24      /* ~8m range (24 * 0.326m = 7.8m) */
 #define PRESENCE_MAX_RANGE_LIMIT_M          8.0f
-#define PRESENCE_MACRO_THRESHOLD            2.0f    /* Macro movement threshold (increased for stability) */
-#define PRESENCE_MICRO_THRESHOLD            40.0f   /* Micro movement threshold (increased from 25.0f) */
+#define PRESENCE_MACRO_THRESHOLD            1.0f    /* Macro movement threshold (increased for stability) */
+#define PRESENCE_MICRO_THRESHOLD            25.0f   /* Micro movement threshold (increased from 25.0f) */
 #define PRESENCE_MACRO_COMPARE_INTERVAL_MS  250     /* Compare interval for macro */
 #define PRESENCE_MACRO_VALIDITY_MS          1000    /* Macro detection validity */
-#define PRESENCE_MICRO_VALIDITY_MS          2000    /* Micro detection validity (reduced from 4000ms) */
+#define PRESENCE_MICRO_VALIDITY_MS          4000    /* Micro detection validity (reduced from 4000ms) */
 #define PRESENCE_MACRO_CONFIRMATIONS        0       /* Required consecutive hits */
 #define PRESENCE_MICRO_FFT_SIZE             128     /* Doppler FFT size */
 #define PRESENCE_MICRO_COMPARE_IDX          5       /* Doppler bins to sum */
-#define PRESENCE_BANDPASS_ENABLED           true    /* Enable bandpass filter */
+#define PRESENCE_BANDPASS_ENABLED           false    /* Enable bandpass filter */
 #define PRESENCE_BANDPASS_NUMTAPS           65      /* FIR filter taps */
 #define PRESENCE_BANDPASS_DELAY_MS          490     /* Bandpass stabilization delay */
 

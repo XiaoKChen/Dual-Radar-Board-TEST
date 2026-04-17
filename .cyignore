@@ -10,3 +10,6 @@ Infineon-BGT60TR13C-Presence-Detection
 
 # Python
 data_test
+
+# emUSB-Device (removed, replaced with UART)
+imports/emusb-device
