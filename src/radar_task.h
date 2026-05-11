@@ -9,6 +9,8 @@
 typedef struct {
     presence_state_t state;
     float32_t range;
+    float32_t distance_m;
+    float32_t angle_deg;
 } radar_status_t;
 
 /* Task Prototypes */

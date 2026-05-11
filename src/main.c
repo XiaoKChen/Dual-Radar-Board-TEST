@@ -102,20 +102,15 @@ void PrintTask(void *pvParameters) {
 
     for(;;) {
         vTaskDelay(pdMS_TO_TICKS(3000));
-        
+
         get_radar_status(&r1, &r2);
-        
-        status_printf("--------------------------------------------------\r\n");
-        if (r1.state == PRESENCE_STATE_ABSENCE) {
-            status_printf("[R1] No human\r\n");
-        } else {
-            status_printf("[R1] Human detect, Range: %.2f m\r\n", r1.range);
-        }
-        
-        if (r2.state == PRESENCE_STATE_ABSENCE) {
-            status_printf("[R2] No human\r\n");
-        } else {
-            status_printf("[R2] Human detect, Range: %.2f m\r\n", r2.range);
-        }
+
+        status_printf("{\"radar\":0,\"distance_m\":%.2f,\"angle_deg\":%.1f,\"presence\":%s}\r\n",
+                      r1.distance_m, r1.angle_deg,
+                      r1.state != PRESENCE_STATE_ABSENCE ? "true" : "false");
+
+        status_printf("{\"radar\":1,\"distance_m\":%.2f,\"angle_deg\":%.1f,\"presence\":%s}\r\n",
+                      r2.distance_m, r2.angle_deg,
+                      r2.state != PRESENCE_STATE_ABSENCE ? "true" : "false");
     }
 }
