@@ -113,6 +113,8 @@ static void run_presence_detection(xensiv_bgt60trxx_mtb_t *sensor_obj,
         status->range = 0.0f;
         status->distance_m = 0.0f;
         status->angle_deg = 0.0f;
+        status->range_bin = -1;
+        status->doppler_bin = INT32_MIN;
         xSemaphoreGive(xStatusMutex);
         return;
     }
@@ -132,10 +134,12 @@ static void run_presence_detection(xensiv_bgt60trxx_mtb_t *sensor_obj,
         status->range = 0.0f;
         status->distance_m = 0.0f;
         status->angle_deg = 0.0f;
+        status->range_bin = -1;
+        status->doppler_bin = INT32_MIN;
         xSemaphoreGive(xStatusMutex);
         return;
     }
-    
+
     /* Normalize raw ADC samples to float [0, 1] */
     uint16_t *bgt60_buffer_ptr = samples;
     float32_t *frame_ptr = &frame[0];
@@ -196,6 +200,8 @@ static void run_presence_detection(xensiv_bgt60trxx_mtb_t *sensor_obj,
     status->range = result.range_m;
     status->distance_m = result.range_m;
     status->angle_deg = angle_deg;
+    status->range_bin = result.range_bin;
+    status->doppler_bin = result.doppler_bin;
     xSemaphoreGive(xStatusMutex);
 }
 

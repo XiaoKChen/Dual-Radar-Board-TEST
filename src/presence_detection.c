@@ -65,6 +65,7 @@ static void presence_reset(presence_context_t *ctx)
     ctx->max_macro_idx = -1;
     ctx->max_micro = 0.0f;
     ctx->max_micro_idx = -1;
+    ctx->peak_doppler_bin = INT32_MIN;
     
     /* Reinitialize bandpass FIR states */
     memset(ctx->bandpass_state_re, 0, sizeof(ctx->bandpass_state_re));
@@ -140,6 +141,7 @@ presence_result_t presence_process_frame(presence_context_t *ctx,
         .state = ctx->state,
         .range_bin = ctx->last_reported_idx >= 0 ? ctx->last_reported_idx : 0,
         .range_m = ctx->last_reported_idx >= 0 ? ctx->last_reported_idx * PRESENCE_RANGE_RESOLUTION : 0.0f,
+        .doppler_bin = ctx->peak_doppler_bin,
         .max_macro_value = ctx->max_macro,
         .max_micro_value = ctx->max_micro
     };
@@ -351,9 +353,27 @@ presence_result_t presence_process_frame(presence_context_t *ctx,
         
         /* Check threshold */
         if (speed >= PRESENCE_MICRO_THRESHOLD) {
-            ctx->micro_detect_timestamps[ctx->micro_fft_calc_col_idx] = 
+            ctx->micro_detect_timestamps[ctx->micro_fft_calc_col_idx] =
                 time_ms + PRESENCE_MICRO_VALIDITY_MS;
             ctx->state = PRESENCE_STATE_MICRO_PRESENCE;
+
+            /* Argmax over the full Doppler spectrum, skipping DC. The cfft
+               input is complex (one range bin over time), so positive and
+               negative Doppler frequencies are both meaningful — convert to
+               signed bin index so the receiver can recover direction. */
+            float32_t peak_mag = 0.0f;
+            int32_t peak_idx = 0;
+            for (int32_t i = 1; i < PRESENCE_MICRO_FFT_SIZE; i++) {
+                float32_t mag = cabsf(ctx->micro_fft_col_buffer[i]);
+                if (mag > peak_mag) {
+                    peak_mag = mag;
+                    peak_idx = i;
+                }
+            }
+            ctx->peak_doppler_bin = (peak_idx < PRESENCE_MICRO_FFT_SIZE / 2)
+                                    ? peak_idx
+                                    : peak_idx - PRESENCE_MICRO_FFT_SIZE;
+            result.doppler_bin = ctx->peak_doppler_bin;
         }
         
         /* Move to next column */
@@ -385,16 +405,18 @@ presence_result_t presence_process_frame(presence_context_t *ctx,
     }
     
     /* Check for absence */
-    if (micro_movement_idx == -1 && 
+    if (micro_movement_idx == -1 &&
         ctx->state == PRESENCE_STATE_MICRO_PRESENCE &&
         ctx->micro_fft_all_calculated) {
         ctx->state = PRESENCE_STATE_ABSENCE;
         ctx->last_micro_reported_idx = -1;
         ctx->micro_fft_all_calculated = false;
-        
+        ctx->peak_doppler_bin = INT32_MIN;
+
         result.state = PRESENCE_STATE_ABSENCE;
         result.range_bin = 0;
         result.range_m = 0.0f;
+        result.doppler_bin = INT32_MIN;
     }
     
     result.max_macro_value = ctx->max_macro;

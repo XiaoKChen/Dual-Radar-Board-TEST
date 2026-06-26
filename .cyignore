@@ -13,3 +13,6 @@ data_test
 
 # emUSB-Device (removed, replaced with UART)
 imports/emusb-device
+
+# pio
+A7-RADAR-TEST

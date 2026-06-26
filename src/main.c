@@ -96,21 +96,51 @@ void SystemTask(void *pvParameters) {
     vTaskDelete(NULL);
 }
 
+static void fill_record(radar_sensor_record_t *rec, uint8_t sensor_id, const radar_status_t *s)
+{
+    rec->sensor_id = sensor_id;
+    rec->flags = (uint8_t)((s->state == PRESENCE_STATE_MACRO_PRESENCE ? RADAR_FLAG_MACRO_PRESENT : 0)
+                         | (s->state == PRESENCE_STATE_MICRO_PRESENCE ? RADAR_FLAG_MICRO_PRESENT : 0));
+    rec->range_bin = (s->state != PRESENCE_STATE_ABSENCE && s->range_bin >= 0)
+                     ? (uint16_t)s->range_bin
+                     : RADAR_RANGE_BIN_NONE;
+    /* Doppler is only computed in the micro pipeline (presence_detection.c
+       Step 5) — the bin range is ±N/2 for an N=128 cFFT, which fits in i16. */
+    rec->doppler_bin = (s->state == PRESENCE_STATE_MICRO_PRESENCE && s->doppler_bin != INT32_MIN)
+                       ? (int16_t)s->doppler_bin
+                       : RADAR_DOPPLER_BIN_NONE;
+
+    if (s->state != PRESENCE_STATE_ABSENCE) {
+        /* Round-then-clamp. Distance is non-negative; reserve 0xFFFF for
+           the sentinel so the clamp ceiling is 0xFFFE. */
+        int32_t mm = (int32_t)(s->distance_m * 1000.0f + 0.5f);
+        if (mm < 0)         mm = 0;
+        else if (mm > 65534) mm = 65534;
+        rec->distance_mm = (uint16_t)mm;
+
+        int32_t cdeg = (int32_t)(s->angle_deg * 100.0f
+                                 + (s->angle_deg >= 0.0f ? 0.5f : -0.5f));
+        if (cdeg >  32767) cdeg =  32767;
+        if (cdeg < -32767) cdeg = -32767;  /* reserve INT16_MIN for sentinel */
+        rec->angle_cdeg = (int16_t)cdeg;
+    } else {
+        rec->distance_mm = RADAR_DISTANCE_MM_NONE;
+        rec->angle_cdeg  = RADAR_ANGLE_CDEG_NONE;
+    }
+    rec->reserved = 0;
+}
+
 void PrintTask(void *pvParameters) {
     (void)pvParameters;
     radar_status_t r1, r2;
+    radar_sensor_record_t records[2];
 
     for(;;) {
         vTaskDelay(pdMS_TO_TICKS(3000));
 
         get_radar_status(&r1, &r2);
-
-        status_printf("{\"radar\":0,\"distance_m\":%.2f,\"angle_deg\":%.1f,\"presence\":%s}\r\n",
-                      r1.distance_m, r1.angle_deg,
-                      r1.state != PRESENCE_STATE_ABSENCE ? "true" : "false");
-
-        status_printf("{\"radar\":1,\"distance_m\":%.2f,\"angle_deg\":%.1f,\"presence\":%s}\r\n",
-                      r2.distance_m, r2.angle_deg,
-                      r2.state != PRESENCE_STATE_ABSENCE ? "true" : "false");
+        fill_record(&records[0], 0, &r1);
+        fill_record(&records[1], 1, &r2);
+        usb_log_presence_binary(records);
     }
 }

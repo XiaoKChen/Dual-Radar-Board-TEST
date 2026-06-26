@@ -65,6 +65,11 @@ typedef struct {
     presence_state_t state;
     int32_t range_bin;
     float32_t range_m;
+    /* Signed Doppler bin of the column where micro presence was last detected:
+       bins 0..N/2-1 map to positive Doppler (approaching), bins N/2..N-1 map
+       to negative Doppler (receding) as -N/2..-1. INT32_MIN means "no data".
+       Only meaningful while state == PRESENCE_STATE_MICRO_PRESENCE. */
+    int32_t doppler_bin;
     float32_t max_macro_value;
     float32_t max_micro_value;
 } presence_result_t;
@@ -117,6 +122,11 @@ typedef struct {
     int32_t max_macro_idx;
     float32_t max_micro;
     int32_t max_micro_idx;
+
+    /* Signed peak Doppler bin from the most recent column that crossed the
+       micro threshold; INT32_MIN means no micro detection has happened yet
+       or state has reset to absence. */
+    int32_t peak_doppler_bin;
     
     /* Working buffer for frame processing */
     float32_t frame_buffer[PRESENCE_NUM_SAMPLES];
