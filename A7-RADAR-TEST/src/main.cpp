@@ -5,23 +5,22 @@
  * Hardware UART (Serial1, D0/D1) @115200 baud : link to PSoC6.
  *
  * Default mode is BINARY (readable JSON out). NORMAL is byte-passthrough for
- * debug, but the PSoC's 32-byte frames are mostly non-printable bytes, so
- * the Serial Monitor will look empty — that's expected.
+ * debug, but the PSoC's frames are mostly non-printable bytes, so the Serial
+ * Monitor will look empty — that's expected.
  *
  * Commands (line-terminated by \n or \r, case-insensitive — set Serial
  * Monitor's line ending to "Newline" or "Both NL & CR"):
  *   normal  -> forward every byte from PSoC6 verbatim to Serial.
- *   binary  -> decode PSoC6 32-byte presence frames and emit JSON.
+ *   binary  -> decode PSoC6 presence frames and emit JSON.
  *   stat    -> print current mode, total bytes received, last-frame age.
  *
- * Binary frame V2 (little-endian, 32 bytes, every ~3 s):
- *   [0xAA][0x55][LEN=26:u16][TYPE=0x02:u8][SEQ:u8]
- *   [record0: 12 bytes][record1: 12 bytes]
- *   [CRC16:u16]   CRC-16/CCITT-FALSE over bytes [0..29]
+ * Binary frame V3 (little-endian, 20 bytes, every ~3 s):
+ *   [0xAA][0x55][LEN=14:u16][TYPE=0x03:u8][SEQ:u8]
+ *   [record0: 6 bytes][record1: 6 bytes]
+ *   [CRC16:u16]   CRC-16/CCITT-FALSE over bytes [0..17]
  *
- * Record layout (12 bytes):
- *   id:u8 | flags:u8 | range_bin:u16 | doppler_bin:i16
- *   distance_mm:u16 | angle_cdeg:i16 | reserved:u16
+ * Record layout (6 bytes) — presence + range + angle only:
+ *   id:u8 | flags:u8 | distance_mm:u16 | angle_cdeg:i16
  */
 
 #include <Arduino.h>
@@ -34,14 +33,12 @@ static const uint32_t LINK_BAUD = 115200;
 
 static const uint8_t  SYNC0       = 0xAA;
 static const uint8_t  SYNC1       = 0x55;
-static const uint8_t  TYPE_V2     = 0x02;
-static const uint16_t PAYLOAD_LEN = 26;
-static const uint16_t FRAME_LEN   = 32;
-static const uint16_t REC_SIZE    = 12;
+static const uint8_t  TYPE_V3     = 0x03;
+static const uint16_t PAYLOAD_LEN = 14;
+static const uint16_t FRAME_LEN   = 20;
+static const uint16_t REC_SIZE    = 6;
 static const uint16_t REC0_OFF    = 6;
-static const uint16_t REC1_OFF    = 6 + 12;
-static const uint16_t RANGE_NONE    = 0xFFFF;
-static const int16_t  DOPPLER_NONE  = INT16_MIN;
+static const uint16_t REC1_OFF    = 6 + 6;
 static const uint16_t DISTANCE_NONE = 0xFFFF;
 static const int16_t  ANGLE_NONE    = INT16_MIN;
 static const uint8_t  FLAG_MACRO  = 0x01;
@@ -149,23 +146,18 @@ static void poll_usb_commands(void) {
 static void emit_record_json(const uint8_t *rec) {
     uint8_t  id       = rec[0];
     uint8_t  flags    = rec[1];
-    uint16_t range    = (uint16_t)rec[2] | ((uint16_t)rec[3] << 8);
-    int16_t  doppler  = (int16_t)((uint16_t)rec[4] | ((uint16_t)rec[5] << 8));
-    uint16_t dist_mm  = (uint16_t)rec[6] | ((uint16_t)rec[7] << 8);
-    int16_t  ang_cdeg = (int16_t)((uint16_t)rec[8] | ((uint16_t)rec[9] << 8));
+    uint16_t dist_mm  = (uint16_t)rec[2] | ((uint16_t)rec[3] << 8);
+    int16_t  ang_cdeg = (int16_t)((uint16_t)rec[4] | ((uint16_t)rec[5] << 8));
+    bool     present  = (flags & (FLAG_MACRO | FLAG_MICRO)) != 0;
 
     Serial.print("{\"id\":");
     Serial.print((int)id);
+    Serial.print(",\"present\":");
+    Serial.print(present ? "true" : "false");
     Serial.print(",\"macro\":");
     Serial.print((flags & FLAG_MACRO) ? "true" : "false");
     Serial.print(",\"micro\":");
     Serial.print((flags & FLAG_MICRO) ? "true" : "false");
-    Serial.print(",\"range\":");
-    if (range == RANGE_NONE) Serial.print("null");
-    else                     Serial.print((unsigned int)range);
-    Serial.print(",\"doppler\":");
-    if (doppler == DOPPLER_NONE) Serial.print("null");
-    else                         Serial.print((int)doppler);
     Serial.print(",\"distance_m\":");
     if (dist_mm == DISTANCE_NONE) Serial.print("null");
     else                          Serial.print(dist_mm / 1000.0f, 3);
@@ -232,7 +224,7 @@ static void handle_byte(uint8_t b) {
         uint16_t calc = crc16_ccitt_false(rx_frame, FRAME_LEN - 2);
         uint8_t type = rx_frame[4];
         uint8_t seq  = rx_frame[5];
-        if (calc == rx_crc && type == TYPE_V2) {
+        if (calc == rx_crc && type == TYPE_V3) {
             link_last_frame_ms = millis();
             emit_frame_json(seq);
         } else if (calc != rx_crc) {

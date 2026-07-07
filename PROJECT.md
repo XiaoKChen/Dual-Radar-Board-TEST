@@ -5,124 +5,157 @@
 
 ```
 Dual-Radar-Board-TEST/
-├── .clangd
-├── .cyignore
-├── .gitignore
-├── .gitmodules
-├── .mtbqueryapi
-├── .ninja_log
-├── .vscode/
-│   ├── c_cpp_properties.json
-│   ├── extensions.json
-│   ├── launch.json
-│   ├── settings.json
-│   └── tasks.json
-├── bsps/
-│   └── TARGET_APP_CY8CPROTO-062S3-4343W/
-│       ├── bluetooth/
-│       ├── bsp.mk
-│       ├── COMPONENT_CM0P/
-│       ├── COMPONENT_CM4/
-│       ├── config/
-│       ├── cybsp.c
-│       ├── cybsp.h
-│       ├── cybsp_doc.h
-│       ├── cybsp_hw_config.h
-│       ├── cybsp_types.h
-│       ├── deps/
-│       ├── docs/
-│       └── system_psoc6.h
-├── data_test/
-│   ├── .python-version
-│   ├── main.py
-│   ├── pyproject.toml
-│   └── src/
-│       ├── format_binary_frames.py
-│       ├── frames.txt
-│       ├── radar_process.py
-│       ├── radar_process_test.py
-│       ├── radar_process_test_001.py
-│       └── serial_logger.py
-├── deps/
-│   ├── assetlocks.json
-│   ├── emusb-device.mtb
-│   ├── freertos.mtb
-│   ├── retarget-io.mtb
-│   └── sensor-xensiv-bgt60trxx.mtb
-├── images/
-│   ├── cdc-echo-firmware-flow.png
-│   ├── terminal-echo.png
-│   ├── terminal-output.png
-│   └── terminal-settings.png
-├── imports/
-│   ├── emusb-device/
-│   │   └── Config/
-│   └── emusb-device.cksum
-├── libs/
-│   ├── abstraction-rtos.mtb
-│   ├── app.mk
-│   ├── cat1cm0p.mtb
-│   ├── clib-support.mtb
-│   ├── cmsis.mtb
-│   ├── core-lib.mtb
-│   ├── core-make.mtb
-│   ├── device-db.mtb
-│   ├── mtb.mk
-│   ├── mtb-hal-cat1.mtb
-│   ├── mtb-pdl-cat1.mtb
-│   └── recipe-make-cat1a.mtb
-├── Makefile
-├── openocd.tcl
-├── project_info.json
-├── src/
-│   ├── FreeRTOSConfig.h
-│   ├── main.c
-│   ├── presence_detection.c
-│   ├── presence_detection.h
-│   ├── presence_radar_settings.h
-│   ├── radar_task.c
-│   ├── radar_task.h
-│   ├── usb_logging.c
-│   └── usb_logging.h
-└── templates/
-    ├── TARGET_CY8CEVAL-062S2/
-    ├── TARGET_CY8CEVAL-062S2-LAI-43439M2/
-    ├── TARGET_CY8CEVAL-062S2-LAI-4373M2/
-    ├── TARGET_CY8CEVAL-062S2-MUR-43439M2/
-    ├── TARGET_CY8CEVAL-062S2-MUR-4373EM2/
-    ├── TARGET_CY8CEVAL-062S2-MUR-4373M2/
-    ├── TARGET_CY8CKIT-062S2-43012/
-    ├── TARGET_CY8CKIT-062S4/
-    ├── TARGET_CY8CKIT-062-WIFI-BT/
-    ├── TARGET_CY8CKIT-064B0S2-4343W/
-    ├── TARGET_CY8CPROTO-062-4343W/
-    ├── TARGET_CY8CPROTO-062S2-43439/
-    ├── TARGET_CY8CPROTO-062S3-4343W/
-    ├── TARGET_CY8CPROTO-064B0S3/
-    ├── TARGET_CYW9P62S1-43012EVB-01/
-    ├── TARGET_CYW9P62S1-43438EVB-01/
-    └── TEST-000/
-        ├── main.c
-        └── presence_radar_settings.h
+  .vscode/
+    c_cpp_properties.json
+    extensions.json
+    launch.json
+    settings.json
+    tasks.json
+  A7-RADAR-TEST/
+    .vscode/
+    src/
+    platformio.ini
+  bgt60-configurator-cli/
+    bgt60-configurator-cli.exe
+    config.json
+    config_1400mhz.json
+    config_2ghz.json
+    lib_avian.dll
+    lib_smartar.dll
+    README.txt
+    sdk_algo.dll
+    sdk_avian.dll
+    sdk_base.dll
+    sdk_fmcw.dll
+    sdk_radar.dll
+    sdk_radar_device_common.dll
+    strata_shared.dll
+  bsps/
+    TARGET_APP_CY8CPROTO-062S3-4343W/
+      bluetooth/
+      COMPONENT_CM0P/
+      COMPONENT_CM4/
+      config/
+      deps/
+      docs/
+  data_test/
+    src/
+      format_binary_frames.py
+      frames.txt
+      radar_process.py
+      radar_process_test.py
+      radar_process_test_001.py
+      serial_logger.py
+    .python-version
+    main.py
+    pyproject.toml
+  deps/
+    assetlocks.json
+    freertos.mtb
+    retarget-io.mtb
+    sensor-xensiv-bgt60trxx.mtb
+  images/
+    cdc-echo-firmware-flow.png
+    terminal-echo.png
+    terminal-output.png
+    terminal-settings.png
+  imports/
+    emusb-device/
+      Config/
+    emusb-device.cksum
+  libs/
+    abstraction-rtos.mtb
+    app.mk
+    cat1cm0p.mtb
+    clib-support.mtb
+    cmsis.mtb
+    core-lib.mtb
+    core-make.mtb
+    device-db.mtb
+    mtb-hal-cat1.mtb
+    mtb-pdl-cat1.mtb
+    mtb.mk
+    recipe-make-cat1a.mtb
+  src/
+    FreeRTOSConfig.h
+    main.c
+    presence_detection.c
+    presence_detection.h
+    presence_radar_settings.h
+    radar_protocol.h
+    radar_task.c
+    radar_task.h
+    usb_logging.c
+    usb_logging.h
+  templates/
+    TARGET_CY8CEVAL-062S2/
+      config/
+    TARGET_CY8CEVAL-062S2-LAI-43439M2/
+      config/
+    TARGET_CY8CEVAL-062S2-LAI-4373M2/
+      config/
+    TARGET_CY8CEVAL-062S2-MUR-43439M2/
+      config/
+    TARGET_CY8CEVAL-062S2-MUR-4373EM2/
+      config/
+    TARGET_CY8CEVAL-062S2-MUR-4373M2/
+      config/
+    TARGET_CY8CKIT-062-WIFI-BT/
+      config/
+    TARGET_CY8CKIT-062S2-43012/
+      config/
+    TARGET_CY8CKIT-062S4/
+      config/
+    TARGET_CY8CKIT-064B0S2-4343W/
+      config/
+    TARGET_CY8CPROTO-062-4343W/
+      config/
+    TARGET_CY8CPROTO-062S2-43439/
+      config/
+    TARGET_CY8CPROTO-062S3-4343W/
+      config/
+    TARGET_CY8CPROTO-064B0S3/
+      config/
+    TARGET_CYW9P62S1-43012EVB-01/
+      config/
+    TARGET_CYW9P62S1-43438EVB-01/
+      config/
+    TEST-000/
+      main.c
+      presence_radar_settings.h
+  .clangd
+  .cyignore
+  .mtbqueryapi
+  .ninja_log
+  LICENSE
+  Makefile
+  mtb-example-usb-device-cdc-echo.code-workspace
+  openocd.tcl
+  project_info.json
 ```
 
 ## Architecture Overview
 
-The system runs on a PSoC 6 (CM4 core) under FreeRTOS: two BGT60TR13C radar sensors share a single SPI bus (mutex-arbitrated), each delivering interrupt-driven frames to `RadarTask`, which feeds a per-sensor `presence_context_t` through a macro/micro DSP pipeline; results are reported every 3 s over USB-CDC by `PrintTask`. The `data_test/` Python suite mirrors the on-device algorithm in NumPy/SciPy for offline validation.
+This is a dual-60 GHz-radar presence detector spanning three physical devices and three software layers, currently configured for a **1.4 GHz chirp bandwidth** (recently changed from a prior 2.0 GHz config — `src/presence_radar_settings.h` explicitly documents the change, and `bgt60-configurator-cli/config_1400mhz.json` / `config_2ghz.json` / `config.json` all coexist as generator inputs). The ModusToolbox application name is `Dual-Radar-Board-TEST` (`APPNAME` in the top-level Makefile).
 
-- **Hardware:** Infineon CY8CPROTO-062S3-4343W (PSoC 6, CY8C6245LQI-S3D72, CM4 @ ~150 MHz + CM0+)
-- **Sensors:** 2× Infineon BGT60TR13C (60 GHz FMCW radar) on shared SPI at 12 MHz
-- **RTOS:** FreeRTOS 10.6 — four tasks: `SystemTask` (init sequencer), `RadarTask` (DSP pipeline), `PrintTask` (USB-CDC output), plus ISR handlers per sensor
-- **USB:** emUSB-Device CDC — binary frame streaming and presence state reporting
-- **DSP:** 128-pt Range FFT → 65-tap FIR bandpass → macro-delta detection + 128-pt Doppler FFT micro-motion detection; CMSIS-DSP accelerated
+**PSoC 6 firmware (`src/`).** An Infineon CY8CPROTO-062S3-4343W runs FreeRTOS with three tasks: `main()` creates only `SystemTask` (priority 3) before starting the scheduler; `SystemTask` initializes the LED, calls the no-op `init_usb_logging()`/`wait_for_usb_configured()` stubs, brings up both radars via `init_dual_radars()`, spawns `RadarTask` (priority 2, 4096-word stack) and `PrintTask` (priority 1, 1024-word stack), then deletes itself. `RadarTask` loops at the sensor's native frame period (`XENSIV_BGT60TRXX_CONF_FRAME_REPETITION_TIME_S` = 0.150149 s ≈ 150 ms) using `vTaskDelayUntil`, arbitrating a single shared SPI bus (12 MHz, `xSpiMutex`) with two independent chip-selects and a hardware-shared reset line. For each sensor it triggers acquisition, blocks on a per-sensor binary semaphore posted from the FIFO-full GPIO ISR (`radar1_irq_handler`/`radar2_irq_handler`, 3 s timeout), reads 128 samples × 32 chirps × 2 RX antennas (RX2/RX3) into a `uint16_t` buffer, normalizes to float32 (`/4096.0f`), and chirp-averages RX2 and RX3 separately. `presence_process_frame` (in `src/presence_detection.c`) runs on the averaged RX2 signal: a 128-point Hamming-windowed real FFT (`arm_rfft_fast_f32`) yields 64 complex range bins; an optional 65-tap complex FIR bandpass is present in the source but compiled out (`PRESENCE_BANDPASS_ENABLED 0`) to keep RAM under budget; macro (large-motion) detection compares the current FFT against a 250 ms-old snapshot per bin (bins 2–56, i.e. ~0.21 m to ~6.0 m at the current ~0.107 m/bin range resolution), scaled by a linear range-intensity window, with a 1000 ms detection-validity window; a circular 128-row Doppler buffer per range bin feeds a 128-point complex FFT (`arm_cfft_f32`) for micro (small-motion) scoring, summing the magnitude of Doppler bins 1–5, with a 4000 ms validity window and a signed peak-Doppler-bin output. Azimuth is computed back in `radar_task.c` from the RX2/RX3 phase difference at the detected range bin via `arg(RX3 · conj(RX2))` and `asinf`, assuming λ/2 RX spacing. The 38-register chirp configuration (`register_list[]`) is generated offline by `bgt60-configurator-cli.exe` from a JSON config and annotated with a diff comment showing only the two PLL1 ramp registers changed between the 2.0 GHz and 1.4 GHz configs. `PrintTask` wakes every 3 s, calls `get_radar_status` (mutex-protected snapshot of both sensors' `radar_status_t`), packs each into a 6-byte `radar_sensor_record_t`, and calls `usb_log_presence_binary`, which assembles a 20-byte V3 frame and writes it with a single `fwrite`+`fflush` over the debug UART (retarget-io). Despite the filename, `usb_logging.c` contains no USB code — all output goes over UART, and `.cyignore` explicitly excludes `imports/emusb-device` from the build.
+
+**V3 binary protocol (`src/radar_protocol.h`).** A fixed 20-byte little-endian frame: `0xAA 0x55` sync, `LEN=14 (u16)`, `TYPE=0x03 (u8)`, `SEQ (u8)`, two 6-byte `radar_sensor_record_t` records (`sensor_id:u8, flags:u8, distance_mm:u16, angle_cdeg:i16`), and a CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF, table-free) over bytes 0–17. `0xFFFF`/`INT16_MIN` are "no target" sentinels. V3 deliberately dropped the V2 range_bin/doppler_bin fields and bumped the type byte so a firmware/decoder mismatch fails loudly.
+
+**A7 UART bridge (`A7-RADAR-TEST/src/main.cpp`).** An Arduino UNO R4 Minima (`platformio.ini`: `uno_r4_minima`, `renesas-ra`/Arduino framework) reads `Serial1` (D0/D1) at 115200 baud from the PSoC6 and exposes `Serial` (USB) at 115200 baud to the host. A 7-state byte FSM (`WAIT_SYNC0` → `READ_CRC1`) parses V3 frames, validates CRC and type, and on success emits one JSON line per frame: `{"seq":N,"s":[{"id":0,"present":true,"macro":true,"micro":false,"distance_m":1.234,"angle_deg":-12.50},{...}]}`. A 5 s liveness watchdog emits `{"warn":"no_link",...}`. A line-based `normal`/`binary`/`stat` command interface on USB Serial toggles byte-passthrough vs JSON decode and reports link statistics.
+
+**Host-side Python suite (`data_test/`).** This directory mixes tooling for two different generations of the firmware. `serial_logger.py` and `format_binary_frames.py` capture/decode a legacy `"RADR"` binary header format (magic+version+sample_size+frame_index+sample_count, default 3 RX antennas / 128 samples-per-chirp) that matches the single-radar `templates/TEST-000/main.c` baseline app, not the current dual-radar V3 protocol. `radar_process.py` and `radar_process_test.py`/`radar_process_test_001.py` are NumPy/SciPy offline replays of a Range-FFT → Doppler-FFT → digital-beamforming/micro-Doppler presence pipeline against captured `frames.txt` fixtures, used for threshold tuning; the radar-parameter constants in `radar_process.py`/`radar_process_test_001.py` (`fc_start=60550001000`, `fc_end=61950001000`) match the current 1.4 GHz config, while `radar_process_test.py` uses frequencies matching `bgt60-configurator-cli/config.json`, indicating it was tuned against an older/narrower test capture.
 
 ## Modules
 
 | Module | Role | Detail |
 |--------|------|--------|
-| **src/** | Application firmware — task orchestration, dual-radar driver, presence DSP, USB-CDC logging | [src/](project-table/src.md) |
-| **bsps/** | Board Support Package for CY8CPROTO-062S3-4343W — dual-core startup, linker scripts, `cybsp_init`, pin aliases | [bsps/](project-table/bsps.md) |
-| **deps/** | ModusToolbox `.mtb` dependency manifests — versioned references for FreeRTOS, emUSB-Device, XENSIV radar driver, retarget-io | [deps/](project-table/deps.md) |
-| **libs/** | Resolved library closure — all transitive `.mtb` references and generated make-system glue | [libs/](project-table/libs.md) |
-| **data_test/** | Host-side Python toolchain — serial frame capture, offline Range/Doppler/DBF DSP analysis, presence algorithm replay | [data_test/](project-table/data_test.md) |
-| **templates/** | Archived device configs for 13 alternative PSoC 6 boards + `TEST-000` single-radar streaming baseline | [templates/](project-table/templates.md) |
+| **src/** | PSoC 6 application firmware — FreeRTOS task structure, dual-radar SPI driver, CMSIS-DSP presence-detection pipeline, V3 frame serialization over UART | [src/](project-table/src.md) |
+| **A7-RADAR-TEST/** | PlatformIO Arduino UNO R4 Minima sketch bridging the PSoC6 UART presence stream to a USB-serial JSON feed | [A7-RADAR-TEST/](project-table/A7-RADAR-TEST.md) |
+| **bgt60-configurator-cli/** | Infineon BGT60 register configurator CLI + JSON chirp configs used to regenerate `src/presence_radar_settings.h` | [bgt60-configurator-cli/](project-table/bgt60-configurator-cli.md) |
+| **bsps/** | ModusToolbox Board Support Package for the active target CY8CPROTO-062S3-4343W — dual-core startup, pin/clock config, linker scripts | [bsps/](project-table/bsps.md) |
+| **deps/** | ModusToolbox `.mtb` manifests version-locking the three direct middleware dependencies (FreeRTOS, retarget-io, XENSIV driver) | [deps/](project-table/deps.md) |
+| **libs/** | Auto-generated resolved transitive dependency closure (11 `.mtb` pins) and make-system glue | [libs/](project-table/libs.md) |
+| **data_test/** | Host-side Python toolchain — serial capture, binary decoding, and offline presence-algorithm replay/validation | [data_test/](project-table/data_test.md) |
+| **templates/** | Archived Device Configurator templates for 16 alternative PSoC 6 boards + `TEST-000` single-radar baseline firmware | [templates/](project-table/templates.md) |
+| **imports/** | Legacy emUSB-Device CDC configuration artifacts, excluded from the active UART-based build | [imports/](project-table/imports.md) |

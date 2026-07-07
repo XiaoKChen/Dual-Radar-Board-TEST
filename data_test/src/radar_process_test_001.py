@@ -7,8 +7,8 @@ import time
 # ==============================================================================
 
 # Radar Hardware Config (from presence_radar_settings.h)
-START_FREQ_HZ = 61020099000
-END_FREQ_HZ = 61479903000
+START_FREQ_HZ = 60550001000
+END_FREQ_HZ = 61950001000
 NUM_SAMPLES_PER_CHIRP = 128
 NUM_CHIRPS_PER_FRAME = 32
 FRAME_PERIOD_SEC = 0.05  # 20Hz (approx from 0.0499562)

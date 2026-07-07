@@ -46,7 +46,7 @@ TARGET=APP_CY8CPROTO-062S3-4343W
 #
 # If APPNAME is edited, ensure to update or regenerate launch
 # configurations for your IDE.
-APPNAME=mtb-example-usb-device-cdc-echo
+APPNAME=Dual-Radar-Board-TEST
 
 # Name of toolchain to use. Options include:
 #

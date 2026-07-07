@@ -43,7 +43,7 @@ void usb_log_presence_binary(const radar_sensor_record_t records[2])
     frame[1] = RADAR_PROTO_SYNC1;
     frame[2] = (uint8_t)(RADAR_PROTO_PRESENCE_PAYLOAD_LEN & 0xFFu);
     frame[3] = (uint8_t)((RADAR_PROTO_PRESENCE_PAYLOAD_LEN >> 8) & 0xFFu);
-    frame[4] = RADAR_PROTO_TYPE_PRESENCE_V2;
+    frame[4] = RADAR_PROTO_TYPE_PRESENCE_V3;
     frame[5] = seq++;
 
     memcpy(&frame[rec_off],            &records[0], rec_size);

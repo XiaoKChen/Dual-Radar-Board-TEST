@@ -101,14 +101,6 @@ static void fill_record(radar_sensor_record_t *rec, uint8_t sensor_id, const rad
     rec->sensor_id = sensor_id;
     rec->flags = (uint8_t)((s->state == PRESENCE_STATE_MACRO_PRESENCE ? RADAR_FLAG_MACRO_PRESENT : 0)
                          | (s->state == PRESENCE_STATE_MICRO_PRESENCE ? RADAR_FLAG_MICRO_PRESENT : 0));
-    rec->range_bin = (s->state != PRESENCE_STATE_ABSENCE && s->range_bin >= 0)
-                     ? (uint16_t)s->range_bin
-                     : RADAR_RANGE_BIN_NONE;
-    /* Doppler is only computed in the micro pipeline (presence_detection.c
-       Step 5) — the bin range is ±N/2 for an N=128 cFFT, which fits in i16. */
-    rec->doppler_bin = (s->state == PRESENCE_STATE_MICRO_PRESENCE && s->doppler_bin != INT32_MIN)
-                       ? (int16_t)s->doppler_bin
-                       : RADAR_DOPPLER_BIN_NONE;
 
     if (s->state != PRESENCE_STATE_ABSENCE) {
         /* Round-then-clamp. Distance is non-negative; reserve 0xFFFF for
@@ -127,7 +119,6 @@ static void fill_record(radar_sensor_record_t *rec, uint8_t sensor_id, const rad
         rec->distance_mm = RADAR_DISTANCE_MM_NONE;
         rec->angle_cdeg  = RADAR_ANGLE_CDEG_NONE;
     }
-    rec->reserved = 0;
 }
 
 void PrintTask(void *pvParameters) {
