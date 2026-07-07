@@ -5,6 +5,7 @@
 * Bandpass Filter Coefficients (10-35Hz)
 * Generated using MATLAB: fir1(64, [10/100 35/100], 'DC-1')
 ********************************************************************************/
+#if PRESENCE_BANDPASS_ENABLED
 static const float32_t bandpass_coeffs[PRESENCE_BANDPASS_NUMTAPS] = {
     -0.000672018944688787f, 5.40997750800323e-05f, -0.00170551007050673f, 0.000706931294401583f,
     0.000529718080087782f,  0.00403359866465874f,  0.00102443397277923f, 0.00234848093688213f,
@@ -26,6 +27,32 @@ static const float32_t bandpass_coeffs[PRESENCE_BANDPASS_NUMTAPS] = {
 };
 
 /**
+ * @brief (Re)initialize the per-range-bin bandpass FIR instances
+ */
+static void bandpass_init(presence_context_t *ctx)
+{
+    memset(ctx->bandpass_state_re, 0, sizeof(ctx->bandpass_state_re));
+    memset(ctx->bandpass_state_im, 0, sizeof(ctx->bandpass_state_im));
+
+    for (int32_t i = 0; i <= PRESENCE_MAX_RANGE_BIN; i++) {
+        int32_t state_offset = i * (PRESENCE_BANDPASS_NUMTAPS + 1);
+
+        arm_fir_init_f32(&ctx->bandpass_fir_re[i],
+                         PRESENCE_BANDPASS_NUMTAPS,
+                         (float32_t*)bandpass_coeffs,
+                         &ctx->bandpass_state_re[state_offset],
+                         1);  /* Block size = 1 */
+
+        arm_fir_init_f32(&ctx->bandpass_fir_im[i],
+                         PRESENCE_BANDPASS_NUMTAPS,
+                         (float32_t*)bandpass_coeffs,
+                         &ctx->bandpass_state_im[state_offset],
+                         1);  /* Block size = 1 */
+    }
+}
+#endif /* PRESENCE_BANDPASS_ENABLED */
+
+/**
  * @brief Generate Hamming window
  */
 static void generate_hamming_window(float32_t *win, uint32_t len)
@@ -43,7 +70,9 @@ static void presence_reset(presence_context_t *ctx)
     /* Clear buffers */
     memset(ctx->macro_fft_buffer, 0, sizeof(ctx->macro_fft_buffer));
     memset(ctx->last_macro_compare, 0, sizeof(ctx->last_macro_compare));
+#if PRESENCE_BANDPASS_ENABLED
     memset(ctx->bandpass_macro_fft_buffer, 0, sizeof(ctx->bandpass_macro_fft_buffer));
+#endif
     memset(ctx->micro_fft_buffer, 0, sizeof(ctx->micro_fft_buffer));
     memset(ctx->macro_detect_timestamps, 0, sizeof(ctx->macro_detect_timestamps));
     memset(ctx->micro_detect_timestamps, 0, sizeof(ctx->micro_detect_timestamps));
@@ -65,26 +94,12 @@ static void presence_reset(presence_context_t *ctx)
     ctx->max_macro_idx = -1;
     ctx->max_micro = 0.0f;
     ctx->max_micro_idx = -1;
-    
+    ctx->peak_doppler_bin = INT32_MIN;
+
+#if PRESENCE_BANDPASS_ENABLED
     /* Reinitialize bandpass FIR states */
-    memset(ctx->bandpass_state_re, 0, sizeof(ctx->bandpass_state_re));
-    memset(ctx->bandpass_state_im, 0, sizeof(ctx->bandpass_state_im));
-    
-    for (int32_t i = 0; i <= PRESENCE_MAX_RANGE_BIN; i++) {
-        int32_t state_offset = i * (PRESENCE_BANDPASS_NUMTAPS + 1);
-        
-        arm_fir_init_f32(&ctx->bandpass_fir_re[i],
-                         PRESENCE_BANDPASS_NUMTAPS,
-                         (float32_t*)bandpass_coeffs,
-                         &ctx->bandpass_state_re[state_offset],
-                         1);
-        
-        arm_fir_init_f32(&ctx->bandpass_fir_im[i],
-                         PRESENCE_BANDPASS_NUMTAPS,
-                         (float32_t*)bandpass_coeffs,
-                         &ctx->bandpass_state_im[state_offset],
-                         1);
-    }
+    bandpass_init(ctx);
+#endif
 }
 
 /**
@@ -104,23 +119,11 @@ void presence_init(presence_context_t *ctx)
         ctx->range_intensity_window[i] = 0.2f * ((float32_t)i + 1.0f);
     }
     
+#if PRESENCE_BANDPASS_ENABLED
     /* Initialize bandpass FIR filters for each range bin */
-    for (int32_t i = 0; i <= PRESENCE_MAX_RANGE_BIN; i++) {
-        int32_t state_offset = i * (PRESENCE_BANDPASS_NUMTAPS + 1);
-        
-        arm_fir_init_f32(&ctx->bandpass_fir_re[i],
-                         PRESENCE_BANDPASS_NUMTAPS,
-                         (float32_t*)bandpass_coeffs,
-                         &ctx->bandpass_state_re[state_offset],
-                         1);  /* Block size = 1 */
-        
-        arm_fir_init_f32(&ctx->bandpass_fir_im[i],
-                         PRESENCE_BANDPASS_NUMTAPS,
-                         (float32_t*)bandpass_coeffs,
-                         &ctx->bandpass_state_im[state_offset],
-                         1);  /* Block size = 1 */
-    }
-    
+    bandpass_init(ctx);
+#endif
+
     /* Reset state */
     presence_reset(ctx);
 }
@@ -140,6 +143,7 @@ presence_result_t presence_process_frame(presence_context_t *ctx,
         .state = ctx->state,
         .range_bin = ctx->last_reported_idx >= 0 ? ctx->last_reported_idx : 0,
         .range_m = ctx->last_reported_idx >= 0 ? ctx->last_reported_idx * PRESENCE_RANGE_RESOLUTION : 0.0f,
+        .doppler_bin = ctx->peak_doppler_bin,
         .max_macro_value = ctx->max_macro,
         .max_micro_value = ctx->max_micro
     };
@@ -174,20 +178,20 @@ presence_result_t presence_process_frame(presence_context_t *ctx,
      * Step 2: Apply Bandpass Filter (optional)
      * ---------------------------------------------------------------- */
     cfloat32_t *active_fft_buffer = ctx->macro_fft_buffer;
-    
-    if (PRESENCE_BANDPASS_ENABLED) {
-        for (int32_t i = 0; i <= PRESENCE_MAX_RANGE_BIN; i++) {
-            float32_t in_re = crealf(ctx->macro_fft_buffer[i]);
-            float32_t in_im = cimagf(ctx->macro_fft_buffer[i]);
-            float32_t out_re, out_im;
-            
-            arm_fir_f32(&ctx->bandpass_fir_re[i], &in_re, &out_re, 1);
-            arm_fir_f32(&ctx->bandpass_fir_im[i], &in_im, &out_im, 1);
-            
-            ctx->bandpass_macro_fft_buffer[i] = out_re + I * out_im;
-        }
-        active_fft_buffer = ctx->bandpass_macro_fft_buffer;
+
+#if PRESENCE_BANDPASS_ENABLED
+    for (int32_t i = 0; i <= PRESENCE_MAX_RANGE_BIN; i++) {
+        float32_t in_re = crealf(ctx->macro_fft_buffer[i]);
+        float32_t in_im = cimagf(ctx->macro_fft_buffer[i]);
+        float32_t out_re, out_im;
+
+        arm_fir_f32(&ctx->bandpass_fir_re[i], &in_re, &out_re, 1);
+        arm_fir_f32(&ctx->bandpass_fir_im[i], &in_im, &out_im, 1);
+
+        ctx->bandpass_macro_fft_buffer[i] = out_re + I * out_im;
     }
+    active_fft_buffer = ctx->bandpass_macro_fft_buffer;
+#endif
     
     /* Initialize last macro compare on first frame */
     if (!ctx->macro_last_compare_init) {
@@ -351,9 +355,27 @@ presence_result_t presence_process_frame(presence_context_t *ctx,
         
         /* Check threshold */
         if (speed >= PRESENCE_MICRO_THRESHOLD) {
-            ctx->micro_detect_timestamps[ctx->micro_fft_calc_col_idx] = 
+            ctx->micro_detect_timestamps[ctx->micro_fft_calc_col_idx] =
                 time_ms + PRESENCE_MICRO_VALIDITY_MS;
             ctx->state = PRESENCE_STATE_MICRO_PRESENCE;
+
+            /* Argmax over the full Doppler spectrum, skipping DC. The cfft
+               input is complex (one range bin over time), so positive and
+               negative Doppler frequencies are both meaningful — convert to
+               signed bin index so the receiver can recover direction. */
+            float32_t peak_mag = 0.0f;
+            int32_t peak_idx = 0;
+            for (int32_t i = 1; i < PRESENCE_MICRO_FFT_SIZE; i++) {
+                float32_t mag = cabsf(ctx->micro_fft_col_buffer[i]);
+                if (mag > peak_mag) {
+                    peak_mag = mag;
+                    peak_idx = i;
+                }
+            }
+            ctx->peak_doppler_bin = (peak_idx < PRESENCE_MICRO_FFT_SIZE / 2)
+                                    ? peak_idx
+                                    : peak_idx - PRESENCE_MICRO_FFT_SIZE;
+            result.doppler_bin = ctx->peak_doppler_bin;
         }
         
         /* Move to next column */
@@ -385,16 +407,18 @@ presence_result_t presence_process_frame(presence_context_t *ctx,
     }
     
     /* Check for absence */
-    if (micro_movement_idx == -1 && 
+    if (micro_movement_idx == -1 &&
         ctx->state == PRESENCE_STATE_MICRO_PRESENCE &&
         ctx->micro_fft_all_calculated) {
         ctx->state = PRESENCE_STATE_ABSENCE;
         ctx->last_micro_reported_idx = -1;
         ctx->micro_fft_all_calculated = false;
-        
+        ctx->peak_doppler_bin = INT32_MIN;
+
         result.state = PRESENCE_STATE_ABSENCE;
         result.range_bin = 0;
         result.range_m = 0.0f;
+        result.doppler_bin = INT32_MIN;
     }
     
     result.max_macro_value = ctx->max_macro;

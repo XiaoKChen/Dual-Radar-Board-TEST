@@ -96,26 +96,42 @@ void SystemTask(void *pvParameters) {
     vTaskDelete(NULL);
 }
 
+static void fill_record(radar_sensor_record_t *rec, uint8_t sensor_id, const radar_status_t *s)
+{
+    rec->sensor_id = sensor_id;
+    rec->flags = (uint8_t)((s->state == PRESENCE_STATE_MACRO_PRESENCE ? RADAR_FLAG_MACRO_PRESENT : 0)
+                         | (s->state == PRESENCE_STATE_MICRO_PRESENCE ? RADAR_FLAG_MICRO_PRESENT : 0));
+
+    if (s->state != PRESENCE_STATE_ABSENCE) {
+        /* Round-then-clamp. Distance is non-negative; reserve 0xFFFF for
+           the sentinel so the clamp ceiling is 0xFFFE. */
+        int32_t mm = (int32_t)(s->distance_m * 1000.0f + 0.5f);
+        if (mm < 0)         mm = 0;
+        else if (mm > 65534) mm = 65534;
+        rec->distance_mm = (uint16_t)mm;
+
+        int32_t cdeg = (int32_t)(s->angle_deg * 100.0f
+                                 + (s->angle_deg >= 0.0f ? 0.5f : -0.5f));
+        if (cdeg >  32767) cdeg =  32767;
+        if (cdeg < -32767) cdeg = -32767;  /* reserve INT16_MIN for sentinel */
+        rec->angle_cdeg = (int16_t)cdeg;
+    } else {
+        rec->distance_mm = RADAR_DISTANCE_MM_NONE;
+        rec->angle_cdeg  = RADAR_ANGLE_CDEG_NONE;
+    }
+}
+
 void PrintTask(void *pvParameters) {
     (void)pvParameters;
     radar_status_t r1, r2;
+    radar_sensor_record_t records[2];
 
     for(;;) {
         vTaskDelay(pdMS_TO_TICKS(3000));
-        
+
         get_radar_status(&r1, &r2);
-        
-        status_printf("--------------------------------------------------\r\n");
-        if (r1.state == PRESENCE_STATE_ABSENCE) {
-            status_printf("[R1] No human\r\n");
-        } else {
-            status_printf("[R1] Human detect, Range: %.2f m\r\n", r1.range);
-        }
-        
-        if (r2.state == PRESENCE_STATE_ABSENCE) {
-            status_printf("[R2] No human\r\n");
-        } else {
-            status_printf("[R2] Human detect, Range: %.2f m\r\n", r2.range);
-        }
+        fill_record(&records[0], 0, &r1);
+        fill_record(&records[1], 1, &r2);
+        usb_log_presence_binary(records);
     }
 }

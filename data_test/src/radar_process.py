@@ -59,8 +59,8 @@ plot_RD_map     = True
 plot_DBF        = True    # plot beampattern for first detected target
 
 # %% --------- Radar Parameters ---------
-fc_start = 61020099000.0
-fc_end = 61479903000.0
+fc_start = 60550001000.0
+fc_end = 61950001000.0
 fc = 0.5 * (fc_start + fc_end)
 c = 299792458.0
 B = fc_end - fc_start

@@ -19,6 +19,10 @@
 #define XENSIV_BGT60TRXX_SPI_FREQUENCY      (12000000UL)
 #define LED1 P10_3
 
+/* RX2-RX3 antenna spacing in units of wavelength. BGT60TR13C standard PCB
+ * layout uses λ/2 spacing (0.5). Adjust if your board differs. */
+#define RADAR_RX_SPACING_LAMBDA             (0.5f)
+
 /* Global variables */
 static cyhal_spi_t cyhal_spi;
 static xensiv_bgt60trxx_mtb_t sensor1;
@@ -37,7 +41,10 @@ static radar_status_t status_r2;
 /* Buffers */
 static uint16_t samples[PRESENCE_NUM_SAMPLES * PRESENCE_NUM_CHIRPS * XENSIV_BGT60TRXX_CONF_NUM_RX_ANTENNAS];
 static float32_t frame[PRESENCE_NUM_SAMPLES * PRESENCE_NUM_CHIRPS * XENSIV_BGT60TRXX_CONF_NUM_RX_ANTENNAS];
-static float32_t avg_chirp[PRESENCE_NUM_SAMPLES];
+static float32_t avg_rx2[PRESENCE_NUM_SAMPLES];
+static float32_t avg_rx3[PRESENCE_NUM_SAMPLES];
+static float32_t rx3_windowed[PRESENCE_NUM_SAMPLES];
+static float32_t rx3_fft_output[PRESENCE_NUM_SAMPLES * 2];
 
 /* Presence detection contexts */
 static presence_context_t presence_ctx_1;
@@ -104,10 +111,14 @@ static void run_presence_detection(xensiv_bgt60trxx_mtb_t *sensor_obj,
         xSemaphoreTake(xStatusMutex, portMAX_DELAY);
         status->state = PRESENCE_STATE_ABSENCE;
         status->range = 0.0f;
+        status->distance_m = 0.0f;
+        status->angle_deg = 0.0f;
+        status->range_bin = -1;
+        status->doppler_bin = INT32_MIN;
         xSemaphoreGive(xStatusMutex);
         return;
     }
-    
+
     /* Read FIFO data */
     int32_t read_res = xensiv_bgt60trxx_get_fifo_data(&sensor_obj->dev, samples, sizeof(samples)/sizeof(samples[0]));
     
@@ -116,40 +127,81 @@ static void run_presence_detection(xensiv_bgt60trxx_mtb_t *sensor_obj,
 
     if (read_res != XENSIV_BGT60TRXX_STATUS_OK) {
         status_printf("FIFO read failed: %ld\r\n", (long)read_res);
-        
+
         /* Update status to indicate failure/absence */
         xSemaphoreTake(xStatusMutex, portMAX_DELAY);
         status->state = PRESENCE_STATE_ABSENCE;
         status->range = 0.0f;
+        status->distance_m = 0.0f;
+        status->angle_deg = 0.0f;
+        status->range_bin = -1;
+        status->doppler_bin = INT32_MIN;
         xSemaphoreGive(xStatusMutex);
         return;
     }
-    
-    /* Data preprocessing */
+
+    /* Normalize raw ADC samples to float [0, 1] */
     uint16_t *bgt60_buffer_ptr = samples;
     float32_t *frame_ptr = &frame[0];
     for (int32_t sample = 0; sample < sizeof(samples)/sizeof(samples[0]); ++sample)
     {
         *frame_ptr++ = ((float32_t)(*bgt60_buffer_ptr++) / 4096.0F);
     }
-    
-    /* Calculate average chirp */
-    arm_fill_f32(0, avg_chirp, PRESENCE_NUM_SAMPLES);
-    
+
+    /* FIFO layout for enabled RX=[2,3]: per chirp, [RX2 samples][RX3 samples].
+       De-interleave and average chirps per channel. */
+    arm_fill_f32(0, avg_rx2, PRESENCE_NUM_SAMPLES);
+    arm_fill_f32(0, avg_rx3, PRESENCE_NUM_SAMPLES);
+
     for (int chirp = 0; chirp < PRESENCE_NUM_CHIRPS; chirp++)
     {
-        arm_add_f32(avg_chirp, &frame[PRESENCE_NUM_SAMPLES * chirp], avg_chirp, PRESENCE_NUM_SAMPLES);
+        int32_t base = chirp * XENSIV_BGT60TRXX_CONF_NUM_RX_ANTENNAS * PRESENCE_NUM_SAMPLES;
+        arm_add_f32(avg_rx2, &frame[base + 0 * PRESENCE_NUM_SAMPLES], avg_rx2, PRESENCE_NUM_SAMPLES);
+        arm_add_f32(avg_rx3, &frame[base + 1 * PRESENCE_NUM_SAMPLES], avg_rx3, PRESENCE_NUM_SAMPLES);
     }
-    
-    arm_scale_f32(avg_chirp, 1.0f / PRESENCE_NUM_CHIRPS, avg_chirp, PRESENCE_NUM_SAMPLES);
-    
-    /* Process frame */
-    presence_result_t result = presence_process_frame(ctx, avg_chirp, time_ms);
-    
+
+    arm_scale_f32(avg_rx2, 1.0f / PRESENCE_NUM_CHIRPS, avg_rx2, PRESENCE_NUM_SAMPLES);
+    arm_scale_f32(avg_rx3, 1.0f / PRESENCE_NUM_CHIRPS, avg_rx3, PRESENCE_NUM_SAMPLES);
+
+    /* Run presence detection on RX2 (primary channel). After return,
+       ctx->macro_fft_buffer[] holds the complex RX2 range FFT. */
+    presence_result_t result = presence_process_frame(ctx, avg_rx2, time_ms);
+
+    /* Compute azimuth angle from RX2/RX3 phase difference at the peak range bin.
+       Only valid when a target was detected (range_bin > 0). */
+    float32_t angle_deg = 0.0f;
+    if (result.range_bin > 0) {
+        for (int32_t i = 0; i < PRESENCE_NUM_SAMPLES; i++) {
+            rx3_windowed[i] = avg_rx3[i] * ctx->hamming_window[i];
+        }
+        arm_rfft_fast_f32(&ctx->rfft_instance, rx3_windowed, rx3_fft_output, 0);
+
+        int32_t k = result.range_bin;
+        float32_t rx2_re = crealf(ctx->macro_fft_buffer[k]);
+        float32_t rx2_im = cimagf(ctx->macro_fft_buffer[k]);
+        float32_t rx3_re = rx3_fft_output[2 * k];
+        float32_t rx3_im = rx3_fft_output[2 * k + 1];
+
+        /* Cross-product form of phase difference: arg(RX3 * conj(RX2)).
+           More numerically robust than subtracting two atan2 calls. */
+        float32_t cross_re = rx3_re * rx2_re + rx3_im * rx2_im;
+        float32_t cross_im = rx3_im * rx2_re - rx3_re * rx2_im;
+        float32_t delta_phi = atan2f(cross_im, cross_re);
+
+        float32_t sin_theta = delta_phi / (2.0f * PI * RADAR_RX_SPACING_LAMBDA);
+        if (sin_theta > 1.0f) sin_theta = 1.0f;
+        else if (sin_theta < -1.0f) sin_theta = -1.0f;
+        angle_deg = asinf(sin_theta) * (180.0f / PI);
+    }
+
     /* Update shared status */
     xSemaphoreTake(xStatusMutex, portMAX_DELAY);
     status->state = result.state;
     status->range = result.range_m;
+    status->distance_m = result.range_m;
+    status->angle_deg = angle_deg;
+    status->range_bin = result.range_bin;
+    status->doppler_bin = result.doppler_bin;
     xSemaphoreGive(xStatusMutex);
 }
 
@@ -281,25 +333,25 @@ cy_rslt_t init_dual_radars(void) {
 
 void RadarTask(void *pvParameters) {
     (void)pvParameters;
-    
-    uint32_t frame_period_ms = (uint32_t)(XENSIV_BGT60TRXX_CONF_FRAME_REPETITION_TIME_S * 1000.0f);
+
+    const uint32_t frame_period_ms = (uint32_t)(XENSIV_BGT60TRXX_CONF_FRAME_REPETITION_TIME_S * 1000.0f);
+    const TickType_t period_ticks = pdMS_TO_TICKS(frame_period_ms);
+    TickType_t last_wake = xTaskGetTickCount();
     uint32_t system_time_ms = 0;
 
     for(;;) {
         system_time_ms += frame_period_ms;
-        
+
         xSemaphoreTake(xSpiMutex, portMAX_DELAY);
         cyhal_gpio_write(LED1, 1);
         run_presence_detection(&sensor1, xRadar1Sem, &presence_ctx_1, &status_r1, system_time_ms);
         xSemaphoreGive(xSpiMutex);
-        
-        vTaskDelay(pdMS_TO_TICKS(50));
-        
+
         xSemaphoreTake(xSpiMutex, portMAX_DELAY);
         run_presence_detection(&sensor2, xRadar2Sem, &presence_ctx_2, &status_r2, system_time_ms);
         cyhal_gpio_write(LED1, 0);
         xSemaphoreGive(xSpiMutex);
-        
-        vTaskDelay(pdMS_TO_TICKS(frame_period_ms));
+
+        vTaskDelayUntil(&last_wake, period_ticks);
     }
 }

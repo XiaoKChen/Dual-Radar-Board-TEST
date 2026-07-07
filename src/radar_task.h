@@ -9,6 +9,10 @@
 typedef struct {
     presence_state_t state;
     float32_t range;
+    float32_t distance_m;
+    float32_t angle_deg;
+    int32_t range_bin;      /* peak range FFT bin, -1 if no target */
+    int32_t doppler_bin;    /* signed Doppler bin from micro FFT, INT32_MIN if none */
 } radar_status_t;
 
 /* Task Prototypes */

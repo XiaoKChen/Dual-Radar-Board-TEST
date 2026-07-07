@@ -31,19 +31,26 @@
 #define PRESENCE_NUM_CHIRPS         XENSIV_BGT60TRXX_CONF_NUM_CHIRPS_PER_FRAME   /* 32 */
 #define PRESENCE_MACRO_FFT_SIZE     (PRESENCE_NUM_SAMPLES / 2)  /* 64 range bins */
 
-/* Presence algorithm configuration */
-#define PRESENCE_MIN_RANGE_BIN              2       /* Increased to 2 to avoid near-field noise (0.33m) */
-#define PRESENCE_MAX_RANGE_BIN              24      /* ~8m range (24 * 0.326m = 7.8m) */
-#define PRESENCE_MAX_RANGE_LIMIT_M          8.0f
-#define PRESENCE_MACRO_THRESHOLD            2.0f    /* Macro movement threshold (increased for stability) */
-#define PRESENCE_MICRO_THRESHOLD            40.0f   /* Micro movement threshold (increased from 25.0f) */
+/* Presence algorithm configuration.
+ * Range resolution is ~0.107 m/bin (1.4 GHz chirp bandwidth), so the 64-bin
+ * range FFT spans ~6.85 m. MAX_RANGE_BIN gates detection at 56 bins
+ * (56 * 0.107 m = ~6.0 m = PRESENCE_MAX_RANGE_LIMIT_M / PRESENCE_RANGE_RESOLUTION).
+ * micro_fft_buffer scales with (MAX_RANGE_BIN+1): 57 columns cost ~58 KB per
+ * presence context, which only fits because the (disabled) bandpass FIR state
+ * arrays are compiled out below — re-enabling PRESENCE_BANDPASS_ENABLED at
+ * this MAX_RANGE_BIN overflows RAM. */
+#define PRESENCE_MIN_RANGE_BIN              2       /* Skip near-field noise (~0.21 m) */
+#define PRESENCE_MAX_RANGE_BIN              56      /* ~6.0 m range (56 * 0.107 m) */
+#define PRESENCE_MAX_RANGE_LIMIT_M          6.0f
+#define PRESENCE_MACRO_THRESHOLD            1.0f    /* Macro movement threshold (increased for stability) */
+#define PRESENCE_MICRO_THRESHOLD            25.0f   /* Micro movement threshold (increased from 25.0f) */
 #define PRESENCE_MACRO_COMPARE_INTERVAL_MS  250     /* Compare interval for macro */
 #define PRESENCE_MACRO_VALIDITY_MS          1000    /* Macro detection validity */
-#define PRESENCE_MICRO_VALIDITY_MS          2000    /* Micro detection validity (reduced from 4000ms) */
+#define PRESENCE_MICRO_VALIDITY_MS          4000    /* Micro detection validity (reduced from 4000ms) */
 #define PRESENCE_MACRO_CONFIRMATIONS        0       /* Required consecutive hits */
 #define PRESENCE_MICRO_FFT_SIZE             128     /* Doppler FFT size */
 #define PRESENCE_MICRO_COMPARE_IDX          5       /* Doppler bins to sum */
-#define PRESENCE_BANDPASS_ENABLED           true    /* Enable bandpass filter */
+#define PRESENCE_BANDPASS_ENABLED           0       /* Enable bandpass filter (0/1; also gates its RAM) */
 #define PRESENCE_BANDPASS_NUMTAPS           65      /* FIR filter taps */
 #define PRESENCE_BANDPASS_DELAY_MS          490     /* Bandpass stabilization delay */
 
@@ -65,6 +72,11 @@ typedef struct {
     presence_state_t state;
     int32_t range_bin;
     float32_t range_m;
+    /* Signed Doppler bin of the column where micro presence was last detected:
+       bins 0..N/2-1 map to positive Doppler (approaching), bins N/2..N-1 map
+       to negative Doppler (receding) as -N/2..-1. INT32_MIN means "no data".
+       Only meaningful while state == PRESENCE_STATE_MICRO_PRESENCE. */
+    int32_t doppler_bin;
     float32_t max_macro_value;
     float32_t max_micro_value;
 } presence_result_t;
@@ -82,14 +94,17 @@ typedef struct {
     /* Macro FFT buffers */
     cfloat32_t macro_fft_buffer[PRESENCE_MACRO_FFT_SIZE];
     cfloat32_t last_macro_compare[PRESENCE_MACRO_FFT_SIZE];
+
+#if PRESENCE_BANDPASS_ENABLED
     cfloat32_t bandpass_macro_fft_buffer[PRESENCE_MACRO_FFT_SIZE];
-    
+
     /* Bandpass FIR filter instances and states for each range bin */
     arm_fir_instance_f32 bandpass_fir_re[PRESENCE_MAX_RANGE_BIN + 1];
     arm_fir_instance_f32 bandpass_fir_im[PRESENCE_MAX_RANGE_BIN + 1];
     float32_t bandpass_state_re[(PRESENCE_MAX_RANGE_BIN + 1) * (PRESENCE_BANDPASS_NUMTAPS + 1)];
     float32_t bandpass_state_im[(PRESENCE_MAX_RANGE_BIN + 1) * (PRESENCE_BANDPASS_NUMTAPS + 1)];
-    
+#endif
+
     /* Micro FFT buffer: [micro_fft_size][max_range_bin+1] */
     cfloat32_t micro_fft_buffer[PRESENCE_MICRO_FFT_SIZE * (PRESENCE_MAX_RANGE_BIN + 1)];
     cfloat32_t micro_fft_col_buffer[PRESENCE_MICRO_FFT_SIZE];
@@ -117,6 +132,11 @@ typedef struct {
     int32_t max_macro_idx;
     float32_t max_micro;
     int32_t max_micro_idx;
+
+    /* Signed peak Doppler bin from the most recent column that crossed the
+       micro threshold; INT32_MIN means no micro detection has happened yet
+       or state has reset to absence. */
+    int32_t peak_doppler_bin;
     
     /* Working buffer for frame processing */
     float32_t frame_buffer[PRESENCE_NUM_SAMPLES];

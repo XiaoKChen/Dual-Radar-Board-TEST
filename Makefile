@@ -46,7 +46,7 @@ TARGET=APP_CY8CPROTO-062S3-4343W
 #
 # If APPNAME is edited, ensure to update or regenerate launch
 # configurations for your IDE.
-APPNAME=mtb-example-usb-device-cdc-echo
+APPNAME=Dual-Radar-Board-TEST
 
 # Name of toolchain to use. Options include:
 #
@@ -85,7 +85,7 @@ VERBOSE=
 # ... then code in directories named COMPONENT_foo and COMPONENT_bar will be
 # added to the build
 #
-COMPONENTS=USBD_BASE CMSIS_DSP FREERTOS
+COMPONENTS=CMSIS_DSP FREERTOS
 
 # Like COMPONENTS, but disable optional code that was enabled by default.
 DISABLE_COMPONENTS=
@@ -95,6 +95,9 @@ DISABLE_COMPONENTS=
 # manually add source code to the build process from a location not searched
 # by default, or otherwise not found by the build system.
 SOURCES=src/presence_detection.c src/usb_logging.c src/radar_task.c
+
+# Exclude emUSB-Device shared library (replaced with UART)
+CY_IGNORE+=../mtb_shared/emusb-device
 
 # Like SOURCES, but for include directories. Value should be paths to
 # directories (without a leading -I).
